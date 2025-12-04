@@ -1,0 +1,26 @@
+{
+  "name": "parser-service",
+  "version": "1.0.0",
+  "description": "Parser service for real estate websites",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js",
+    "install-browsers": "node node_modules/playwright/cli.js install chromium",
+    "postinstall": "node node_modules/playwright/cli.js install chromium || true",
+    "debug": "node debug-selectors.js",
+    "get-html": "node get-html.js"
+  },
+  "dependencies": {
+    "playwright": "^1.40.0",
+    "axios": "^1.6.2",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2"
+  }
+}
+
+
+

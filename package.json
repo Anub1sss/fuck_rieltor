@@ -1,0 +1,21 @@
+{
+  "name": "fuck-rieltor-parser",
+  "version": "1.0.0",
+  "description": "Parser service for real estate websites",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js"
+  },
+  "dependencies": {
+    "playwright": "^1.40.0",
+    "axios": "^1.6.2",
+    "dotenv": "^16.3.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2"
+  }
+}
+
+
+
