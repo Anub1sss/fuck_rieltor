@@ -41,7 +41,13 @@ async function initBrowser() {
                 '--no-sandbox',
                 '--disable-setuid-sandbox',
                 '--disable-blink-features=AutomationControlled',
-                '--disable-dev-shm-usage'
+                '--disable-dev-shm-usage',
+                '--disable-breakpad',
+                '--disable-crash-reporter',
+                '--disable-crashpad',
+                '--disable-infobars',
+                '--disable-gpu',
+                '--disable-software-rasterizer'
             ]
         });
         
@@ -114,7 +120,7 @@ async function parseNumber(text, regex) {
 
 async function getApartmentDetails(page, url) {
     try {
-        await page.goto(url, { waitUntil: 'networkidle', timeout: 30000 });
+        await page.goto(url, { waitUntil: 'networkidle', timeout: 60000 });
         await page.waitForTimeout(2000);
         
         const details = {
@@ -168,7 +174,7 @@ async function parseCian() {
     try {
         const baseUrl = 'https://www.cian.ru/cat.php?deal_type=rent&engine_version=2&max_commission=0&offer_type=flat&region=1&type=4';
         let allApartments = [];
-        const maxPages = 3; 
+        const maxPages = 10; 
         
         
         for (let pageNum = 1; pageNum <= maxPages; pageNum++) {
@@ -181,7 +187,7 @@ async function parseCian() {
             }
             
             console.log(`🌐 Открываю URL: ${pageUrl}`);
-            await page.goto(pageUrl, { waitUntil: 'networkidle', timeout: 60000 });
+            await page.goto(pageUrl, { waitUntil: 'networkidle', timeout: 120000 });
         await page.waitForTimeout(3000);
             
             
@@ -207,8 +213,8 @@ async function parseCian() {
                 await page.evaluate(() => {
                     window.scrollBy(0, window.innerHeight * 2);
                 });
-                await page.waitForTimeout(2000);
-                
+        await page.waitForTimeout(2000);
+        
                 
                 cards = await page.$$('article[data-name="CardComponent"]');
                 console.log(`После скролла ${scroll + 1}: найдено ${cards.length} карточек`);
@@ -285,22 +291,44 @@ async function parseCian() {
                 const totalFloors = floorMatch ? parseInt(floorMatch[2]) : null;
                 
                 
-                const priceText = await card.evaluate(el => {
-                                    const priceEl = el.querySelector('span[data-mark="MainPrice"]');
-                                    return priceEl ? priceEl.textContent.trim() : '';
-                                }).catch(() => '');
-                const price = await parsePrice(priceText);
+                // Извлечение цены и дополнительной информации
+                const priceInfo = await card.evaluate(el => {
+                    const priceEl = el.querySelector('span[data-mark="MainPrice"]');
+                    const price = priceEl ? priceEl.textContent.trim() : '';
+                    
+                    const priceInfoEl = el.querySelector('p[data-mark="PriceInfo"]');
+                    const priceInfoText = priceInfoEl ? priceInfoEl.textContent.trim() : '';
+                    
+                    const depositMatch = priceInfoText.match(/залог\s+(\d+[\s\u00A0]*\d*)/i);
+                    const deposit = depositMatch ? parseFloat(depositMatch[1].replace(/[\s\u00A0]/g, '')) : null;
+                    
+                    const noCommission = priceInfoText.toLowerCase().includes('без комиссии');
+                    const utilitiesIncluded = priceInfoText.toLowerCase().includes('платежи включены') ||
+                                            priceInfoText.toLowerCase().includes('счётчики включены');
+                    const rentalPeriodMatch = priceInfoText.match(/(от\s+года|от\s+\d+\s+месяц)/i);
+                    const rentalPeriod = rentalPeriodMatch ? rentalPeriodMatch[0] : '';
+                    
+                    return { price, deposit, noCommission, utilitiesIncluded, rentalPeriod };
+                }).catch(() => ({ price: '', deposit: null, noCommission: true, utilitiesIncluded: false, rentalPeriod: '' }));
+                
+                const price = await parsePrice(priceInfo.price);
                 
                 
-                const metro = await card.evaluate(el => {
-                                    const metroEl = el.querySelector('div[data-name="SpecialGeo"]');
-                                    if (metroEl) {
-                                        const metroText = metroEl.textContent.trim();
-                                        const match = metroText.match(/^([^,•]+)/);
-                                        return match ? match[1].trim() : '';
-                                    }
-                                    return '';
-                                }).catch(() => '');
+                const metroInfo = await card.evaluate(el => {
+                    const metroEl = el.querySelector('div[data-name="SpecialGeo"]');
+                    if (!metroEl) return { station: '', distance: '', transport: 'пешком' };
+                    
+                    const metroText = metroEl.textContent.trim();
+                    const match = metroText.match(/^([^,•\d]+)/);
+                    const station = match ? match[1].trim() : '';
+                    
+                    const distanceEl = metroEl.querySelector('div.x31de4314--_39b28--remoteness');
+                    const distance = distanceEl ? distanceEl.textContent.trim() : '';
+                    const transport = distance.toLowerCase().includes('пешком') ? 'пешком' : 
+                                    distance.toLowerCase().includes('транспорт') ? 'транспорт' : 'пешком';
+                    
+                    return { station, distance, transport };
+                }).catch(() => ({ station: '', distance: '', transport: 'пешком' }));
                 
                 
                 const address = await card.evaluate(el => {
@@ -315,16 +343,31 @@ async function parseCian() {
                 
                 
                 const photos = await card.evaluate(el => {
-                                    const gallery = el.querySelector('div[data-name="Gallery"]');
-                                    if (!gallery) return [];
-                                    const imgs = gallery.querySelectorAll('img[src*="images.cdn-cian.ru"]');
-                                    return Array.from(imgs).slice(0, 10).map(img => {
-                                        const src = img.getAttribute('src');
-                                        return src && (src.startsWith('http') || src.startsWith('//'))
-                                            ? (src.startsWith('//') ? `https:${src}` : src)
-                                            : null;
-                                    }).filter(Boolean);
-                                }).catch(() => []);
+                    const gallery = el.querySelector('div[data-name="Gallery"]');
+                    if (!gallery) return [];
+                    const imgs = gallery.querySelectorAll('img[src*="images.cdn-cian.ru"], img[srcset*="images.cdn-cian.ru"]');
+                    const photoUrls = new Set();
+                    
+                    imgs.forEach(img => {
+                        const src = img.getAttribute('src');
+                        const srcset = img.getAttribute('srcset');
+                        
+                        if (srcset) {
+                            const urls = srcset.split(',').map(s => s.trim().split(' ')[0]);
+                            urls.forEach(url => {
+                                if (url && url.includes('images.cdn-cian.ru')) {
+                                    photoUrls.add(url.startsWith('//') ? `https:${url}` : url);
+                                }
+                            });
+                        }
+                        
+                        if (src && src.includes('images.cdn-cian.ru')) {
+                            photoUrls.add(src.startsWith('//') ? `https:${src}` : src);
+                        }
+                    });
+                    
+                    return Array.from(photoUrls).slice(0, 20);
+                }).catch(() => []);
                 
                 
                 const description = await card.evaluate(el => {
@@ -387,13 +430,18 @@ async function parseCian() {
                     floor: floor,
                     total_floors: totalFloors,
                     district: district,
-                    metro_station: metro,
+                    metro_station: metroInfo.station,
+                    metro_distance: metroInfo.distance,
+                    metro_transport: metroInfo.transport,
                     address: address,
                     title: title || subtitle,
                     description: description || subtitle,
                     photos: photos,
                     is_owner: true,
-                    no_commission: true,
+                    no_commission: priceInfo.noCommission,
+                    deposit: priceInfo.deposit,
+                    utilities_included: priceInfo.utilitiesIncluded,
+                    rental_period: priceInfo.rentalPeriod,
                     
                     building_year: buildingYear,
                     building_type: buildingType,
@@ -456,9 +504,9 @@ async function parseAvito() {
             }
             
             console.log(`🌐 Открываю URL: ${pageUrl}`);
-            await page.goto(pageUrl, { waitUntil: 'networkidle', timeout: 60000 });
+            await page.goto(pageUrl, { waitUntil: 'networkidle', timeout: 120000 });
         await page.waitForTimeout(3000);
-            
+        
             const currentUrl = page.url();
             console.log(`✅ Текущий URL после загрузки: ${currentUrl}`);
         
@@ -474,8 +522,8 @@ async function parseAvito() {
                 await page.evaluate(() => {
                     window.scrollBy(0, window.innerHeight * 2);
                 });
-                await page.waitForTimeout(2000);
-                
+        await page.waitForTimeout(2000);
+        
                 
                 items = await page.$$('[data-marker="item"]');
                 console.log(`После скролла ${scroll + 1}: найдено ${items.length} карточек`);
@@ -563,9 +611,7 @@ async function parseAvito() {
                 const metro = await item.evaluate(el => {
                     const addressEl = el.querySelector('[data-marker="item-address"]');
                     if (addressEl) {
-                        
                         const text = addressEl.textContent;
-                        
                         const lines = text.split('\n');
                         for (const line of lines) {
                             if (line.includes('мин.') || line.match(/^[А-ЯЁ][а-яё]+/)) {
@@ -611,22 +657,23 @@ async function parseAvito() {
                                           src.startsWith('http') ? src : `https:${src}`;
                             if (!photoUrls.includes(fullSrc)) {
                                 photoUrls.push(fullSrc);
-                            }
-                        }
+                    }
+                }
                     });
                     return photoUrls.slice(0, 10);
                 }).catch(() => []);
                 
                 
-                const descText = (description || '').toLowerCase();
+                const descText = `${description || ''} ${title || ''}`.toLowerCase();
                 const hasFurniture = descText.includes('мебель') || descText.includes('меблирован');
                 const hasAppliances = descText.includes('техника') || descText.includes('холодильник') || 
                                      descText.includes('стиральная') || descText.includes('посудомоечная') ||
-                                     descText.includes('микроволнов') || descText.includes('кондиционер');
-                const hasInternet = descText.includes('интернет') || descText.includes('wi-fi');
-                const hasParking = descText.includes('парковк') || descText.includes('гараж');
+                                     descText.includes('микроволнов') || descText.includes('кондиционер') ||
+                                     descText.includes('духовой шкаф') || descText.includes('варочн');
+                const hasInternet = descText.includes('интернет') || descText.includes('wi-fi') || descText.includes('wifi');
+                const hasParking = descText.includes('парковк') || descText.includes('гараж') || descText.includes('машиномест');
                 const hasElevator = descText.includes('лифт');
-                const hasBalcony = descText.includes('балкон') || descText.includes('лоджия');
+                const hasBalcony = descText.includes('балкон') || descText.includes('лоджия') || descText.includes('терраса');
                 
                 let buildingType = null;
                 if (descText.includes('кирпич')) buildingType = 'кирпич';
@@ -720,7 +767,7 @@ async function parseYandex() {
         const baseUrl = 'https://realty.yandex.ru/moskva/snyat/kvartira/bez-komissii/';
         
         let allApartments = [];
-        const maxPages = 3; 
+        const maxPages = 10; 
         
         
         for (let pageNum = 1; pageNum <= maxPages; pageNum++) {
@@ -733,9 +780,9 @@ async function parseYandex() {
             }
             
             console.log(`🌐 Открываю URL: ${pageUrl}`);
-            await page.goto(pageUrl, { waitUntil: 'networkidle', timeout: 60000 });
-            await page.waitForTimeout(3000);
-            
+            await page.goto(pageUrl, { waitUntil: 'networkidle', timeout: 120000 });
+        await page.waitForTimeout(3000);
+        
             const currentUrl = page.url();
             console.log(`✅ Текущий URL после загрузки: ${currentUrl}`);
             
@@ -829,52 +876,71 @@ async function parseYandex() {
                 const totalFloors = floorMatch ? parseInt(floorMatch[2]) : null;
                 
                 
-                const priceText = await card.evaluate(el => {
-                    
+                // Извлечение цены и дополнительной информации
+                const priceInfo = await card.evaluate(el => {
                     const priceContainer = el.querySelector('div.OffersSerpItem__price.PriceWithDiscount__container--QehfS');
+                    let price = '';
+                    
                     if (priceContainer) {
-                        
                         const priceDiv = priceContainer.querySelector('div > div > div > div');
                         if (priceDiv) {
-                            
                             const spans = priceDiv.querySelectorAll('span');
                             if (spans.length > 0) {
-                                const firstSpan = spans[0];
-                                const text = firstSpan.textContent.trim();
-                                
+                                const text = spans[0].textContent.trim();
                                 const cleanText = text.replace(/[\s\u00A0\u2009]/g, '');
                                 if (cleanText && /^\d+$/.test(cleanText)) {
-                                    return cleanText;
+                                    price = cleanText;
                                 }
                             }
                         }
                         
-                        const allSpans = priceContainer.querySelectorAll('span');
-                        for (const span of allSpans) {
-                            const text = span.textContent.trim();
-                            const cleanText = text.replace(/[\s\u00A0\u2009]/g, '');
-                            
-                            if (cleanText && /^\d+$/.test(cleanText) && cleanText.length >= 4) {
-                                return cleanText;
+                        if (!price) {
+                            const allSpans = priceContainer.querySelectorAll('span');
+                            for (const span of allSpans) {
+                                const text = span.textContent.trim();
+                                const cleanText = text.replace(/[\s\u00A0\u2009]/g, '');
+                                if (cleanText && /^\d+$/.test(cleanText) && cleanText.length >= 4) {
+                                    price = cleanText;
+                                    break;
+                                }
                             }
                         }
                     }
-                    return '';
-                }).catch(() => '');
+                    
+                    // Дополнительная информация о цене
+                    const priceInfoEl = el.querySelector('div.OffersSerpItem__dealInfo p[data-mark="PriceInfo"]');
+                    const infoText = priceInfoEl ? priceInfoEl.textContent.toLowerCase() : '';
+                    
+                    const depositMatch = infoText.match(/залог\s+(\d+[\s\u00A0]*\d*)/);
+                    const deposit = depositMatch ? parseFloat(depositMatch[1].replace(/[\s\u00A0]/g, '')) : null;
+                    
+                    const noCommission = infoText.includes('без комиссии') || infoText.includes('без\u00A0комиссии');
+                    const utilitiesIncluded = infoText.includes('платежи включены') || infoText.includes('жку');
+                    const rentalPeriodMatch = infoText.match(/(от\s+года|от\s+\d+\s+месяц)/);
+                    const rentalPeriod = rentalPeriodMatch ? rentalPeriodMatch[0] : '';
+                    
+                    return { price, deposit, noCommission, utilitiesIncluded, rentalPeriod };
+                }).catch(() => ({ price: '', deposit: null, noCommission: true, utilitiesIncluded: false, rentalPeriod: '' }));
                 
-                console.log(`  Цена (текст): "${priceText}"`);
+                console.log(`  Цена (текст): "${priceInfo.price}"`);
                 
-                const price = priceText ? parseFloat(priceText) : 0;
-                if ((i + 1) % 10 === 0 || (i + 1) === maxCards) {
-                    console.log(`✅ Обработано ${i + 1}/${maxCards} карточек со страницы ${pageNum}`);
-                }
+                const price = priceInfo.price ? parseFloat(priceInfo.price) : 0;
                 
                 
-                const metro = await card.evaluate(el => {
+                // Метро с временем и транспортом
+                const metroInfo = await card.evaluate(el => {
                     const metroEl = el.querySelector('span.MetroStation__title') ||
-                                  el.querySelector('a[data-test="LinkedMetroWithTimeLink"] span');
-                    return metroEl ? metroEl.textContent.trim() : '';
-                }).catch(() => '');
+                                  el.querySelector('a[data-test="LinkedMetroWithTimeLink"] span.MetroStation__title');
+                    const station = metroEl ? metroEl.textContent.trim() : '';
+                    
+                    const distanceEl = el.querySelector('span.MetroWithTime__distance');
+                    const distance = distanceEl ? distanceEl.textContent.trim() : '';
+                    
+                    const transport = distance.includes('пешком') || el.querySelector('i.Icon_type_small-pedestrian') ? 
+                                    'пешком' : 'транспорт';
+                    
+                    return { station, distance, transport };
+                }).catch(() => ({ station: '', distance: '', transport: 'пешком' }));
                 
                 
                 const address = await card.evaluate(el => {
@@ -896,19 +962,34 @@ async function parseYandex() {
                 
                 
                 const photos = await card.evaluate(el => {
-                    const imgs = el.querySelectorAll('img.Gallery__activeImg, img.Gallery__item, img.OffersSerpItem__images-bottom-img');
-                    const photoUrls = [];
+                    const imgs = el.querySelectorAll('img.Gallery__activeImg, img, img.OffersSerpItem__images-bottom-img');
+                    const photoUrls = new Set();
+                    
                     imgs.forEach(img => {
-                        const src = img.getAttribute('src') || img.getAttribute('data-src');
+                        const src = img.getAttribute('src');
+                        const srcset = img.getAttribute('srcset');
+                        
+                        // Обработка srcset
+                        if (srcset) {
+                            const urls = srcset.split(',').map(s => s.trim().split(' ')[0]);
+                            urls.forEach(url => {
+                                if (url && (url.includes('avatars.mds.yandex.net') || url.includes('get-realty'))) {
+                                    const fullUrl = url.startsWith('//') ? `https:${url}` : 
+                                                  url.startsWith('http') ? url : `https:${url}`;
+                                    photoUrls.add(fullUrl);
+                                }
+                            });
+                        }
+                        
+                        // Обработка src
                         if (src && (src.includes('avatars.mds.yandex.net') || src.includes('get-realty'))) {
                             const fullSrc = src.startsWith('//') ? `https:${src}` :
                                           src.startsWith('http') ? src : `https:${src}`;
-                            if (!photoUrls.includes(fullSrc)) {
-                                photoUrls.push(fullSrc);
-                            }
+                            photoUrls.add(fullSrc);
                         }
                     });
-                    return photoUrls.slice(0, 10);
+                    
+                    return Array.from(photoUrls).slice(0, 20);
                 }).catch(() => []);
                 
                 
@@ -937,6 +1018,12 @@ async function parseYandex() {
                 if (hasElevator) features.push('лифт');
                 if (hasBalcony) features.push('балкон');
                 
+                // Дата публикации
+                const publishedDate = await card.evaluate(el => {
+                    const dateEl = el.querySelector('div.OffersSerpItem__publish-date__hide');
+                    return dateEl ? dateEl.textContent.trim() : '';
+                }).catch(() => '');
+                
                 apartments.push({
                     external_id: externalId,
                     url: fullUrl,
@@ -945,13 +1032,19 @@ async function parseYandex() {
                     rooms: rooms,
                     floor: floor,
                     total_floors: totalFloors,
-                    metro_station: metro,
+                    metro_station: metroInfo.station,
+                    metro_distance: metroInfo.distance,
+                    metro_transport: metroInfo.transport,
                     address: address,
                     title: title || `${area ? area + ' м²' : ''} ${rooms !== null ? rooms + '-комн.' : 'квартира'}`,
                     description: description,
                     photos: photos,
                     is_owner: true,
-                    no_commission: true,
+                    no_commission: priceInfo.noCommission,
+                    deposit: priceInfo.deposit,
+                    utilities_included: priceInfo.utilitiesIncluded,
+                    rental_period: priceInfo.rentalPeriod,
+                    published_date: publishedDate,
                     building_type: buildingType,
                     has_furniture: hasFurniture,
                     has_appliances: hasAppliances,
@@ -1050,7 +1143,7 @@ app.post('/parse/:source', async (req, res) => {
             `${DJANGO_API_URL}/parser/update-apartments/`,
             { source, apartments },
             { 
-                timeout: 60000,
+                timeout: 120000,
                 headers: {
                     'Content-Type': 'application/json'
                 }

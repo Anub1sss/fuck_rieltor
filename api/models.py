@@ -25,6 +25,15 @@ class Apartment(models.Model):
     living_area = models.DecimalField(max_digits=6, decimal_places=2, null=True, blank=True)
     kitchen_area = models.DecimalField(max_digits=6, decimal_places=2, null=True, blank=True)
     
+    # Дополнительные характеристики
+    deposit = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)  # Залог
+    commission = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)  # Комиссия
+    utilities_included = models.BooleanField(default=False)  # ЖКУ включены
+    rental_period = models.CharField(max_length=100, null=True, blank=True)  # Срок аренды
+    metro_distance = models.CharField(max_length=100, null=True, blank=True)  # Время до метро
+    metro_transport = models.CharField(max_length=50, null=True, blank=True)  # пешком/транспорт
+    published_date = models.CharField(max_length=100, null=True, blank=True)  # Дата публикации
+    
     district = models.CharField(max_length=200, null=True, blank=True)
     metro_station = models.CharField(max_length=200, null=True, blank=True)
     address = models.TextField(null=True, blank=True)

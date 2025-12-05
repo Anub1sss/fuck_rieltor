@@ -3,7 +3,7 @@ from django.utils import timezone
 from django.conf import settings
 import requests
 import logging
-from api.models import ParseTask, Apartment, Source
+from api.models import ParseTask, Apartment, Source, ParseLog
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +18,7 @@ def start_parse_task(source):
         task.save()
         
         parser_url = f"{settings.PARSER_SERVICE_URL}/parse/{source}"
-        response = requests.post(parser_url, timeout=300)  # 5 минут для парсинга 3 страниц
+        response = requests.post(parser_url, timeout=600)  # 10 минут для парсинга 10 страниц
         
         if response.status_code == 200:
             data = response.json()
@@ -76,6 +76,13 @@ def update_apartments_from_parser(source, apartments_data):
                 'building_type': apt_data.get('building_type'),
                 'living_area': apt_data.get('living_area'),
                 'kitchen_area': apt_data.get('kitchen_area'),
+                'deposit': apt_data.get('deposit'),
+                'commission': apt_data.get('commission'),
+                'utilities_included': apt_data.get('utilities_included', False),
+                'rental_period': apt_data.get('rental_period'),
+                'metro_distance': apt_data.get('metro_distance'),
+                'metro_transport': apt_data.get('metro_transport'),
+                'published_date': apt_data.get('published_date'),
                 'has_furniture': apt_data.get('has_furniture', False),
                 'has_appliances': apt_data.get('has_appliances', False),
                 'has_internet': apt_data.get('has_internet', False),
