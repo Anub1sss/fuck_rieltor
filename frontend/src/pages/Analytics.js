@@ -42,32 +42,39 @@ const Analytics = () => {
   const featuresStats = calculateFeaturesStats(apartments);
   const floorDistribution = calculateFloorDistribution(apartments);
 
+  // Вычисляем статистику цен
+  const avgPrice = calculateAvgPrice(apartments);
+  const medianPrice = calculateMedianPrice(apartments);
+  const validPrices = apartments.filter(a => a.price && !isNaN(parseFloat(a.price))).map(a => parseFloat(a.price));
+  const minPrice = validPrices.length > 0 ? Math.min(...validPrices) : 0;
+  const maxPrice = validPrices.length > 0 ? Math.max(...validPrices) : 0;
+
   return (
     <div className="analytics">
       {/* Top Stats */}
       <div className="analytics-stats">
         <StatBox
           title="Средняя цена"
-          value={formatPrice(calculateAvgPrice(apartments))}
+          value={formatPrice(avgPrice)}
           suffix="₽/мес"
           icon="◈"
         />
         <StatBox
           title="Медианная цена"
-          value={formatPrice(calculateMedianPrice(apartments))}
+          value={formatPrice(medianPrice)}
           suffix="₽/мес"
           icon="◐"
         />
         <StatBox
           title="Мин. цена"
-          value={formatPrice(Math.min(...apartments.map(a => a.price || Infinity)))}
+          value={formatPrice(minPrice)}
           suffix="₽/мес"
           icon="▽"
           color="green"
         />
         <StatBox
           title="Макс. цена"
-          value={formatPrice(Math.max(...apartments.map(a => a.price || 0)))}
+          value={formatPrice(maxPrice)}
           suffix="₽/мес"
           icon="△"
           color="red"
@@ -240,15 +247,26 @@ const tooltipStyle = {
 
 // Функции расчёта
 const calculateAvgPrice = (apartments) => {
-  if (apartments.length === 0) return 0;
-  return Math.round(apartments.reduce((sum, a) => sum + (a.price || 0), 0) / apartments.length);
+  if (!apartments || apartments.length === 0) return 0;
+  const validPrices = apartments.filter(a => a.price && !isNaN(parseFloat(a.price))).map(a => parseFloat(a.price));
+  if (validPrices.length === 0) return 0;
+  const sum = validPrices.reduce((acc, price) => acc + price, 0);
+  const avg = sum / validPrices.length;
+  return isNaN(avg) ? 0 : Math.round(avg);
 };
 
 const calculateMedianPrice = (apartments) => {
-  if (apartments.length === 0) return 0;
-  const prices = apartments.map(a => a.price || 0).sort((a, b) => a - b);
-  const mid = Math.floor(prices.length / 2);
-  return prices.length % 2 !== 0 ? prices[mid] : Math.round((prices[mid - 1] + prices[mid]) / 2);
+  if (!apartments || apartments.length === 0) return 0;
+  const validPrices = apartments
+    .filter(a => a.price && !isNaN(parseFloat(a.price)))
+    .map(a => parseFloat(a.price))
+    .sort((a, b) => a - b);
+  if (validPrices.length === 0) return 0;
+  const mid = Math.floor(validPrices.length / 2);
+  const median = validPrices.length % 2 !== 0 
+    ? validPrices[mid] 
+    : (validPrices[mid - 1] + validPrices[mid]) / 2;
+  return isNaN(median) ? 0 : Math.round(median);
 };
 
 const calculateAvgPriceByRooms = (apartments) => {
@@ -343,7 +361,16 @@ const calculateFloorDistribution = (apartments) => {
   }));
 };
 
-const formatPrice = (price) => new Intl.NumberFormat('ru-RU').format(price);
+const formatPrice = (price) => {
+  if (!price || isNaN(price) || price === null || price === undefined) {
+    return '0';
+  }
+  const numPrice = typeof price === 'string' ? parseFloat(price) : price;
+  if (isNaN(numPrice)) {
+    return '0';
+  }
+  return new Intl.NumberFormat('ru-RU').format(numPrice);
+};
 
 const AnalyticsSkeleton = () => (
   <div className="analytics">

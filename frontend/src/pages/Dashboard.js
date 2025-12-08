@@ -35,10 +35,51 @@ const Dashboard = () => {
     return <DashboardSkeleton />;
   }
 
-  const roomsData = stats?.byRooms ? Object.entries(stats.byRooms).map(([name, value]) => ({ name, value })) : [];
-  const sourceData = stats?.bySource ? Object.entries(stats.bySource).map(([name, value]) => ({ name, value })) : [];
+  // Нормализуем данные для графиков
+  const roomsData = stats?.byRooms 
+    ? Object.entries(stats.byRooms).map(([name, value]) => ({ name, value }))
+    : stats?.by_rooms
+    ? Object.entries(stats.by_rooms).map(([name, value]) => ({ name, value }))
+    : [];
+  
+  const sourceData = stats?.bySource 
+    ? Object.entries(stats.bySource).map(([name, value]) => ({ name, value }))
+    : stats?.by_source
+    ? Object.entries(stats.by_source).map(([name, value]) => ({ name, value }))
+    : [];
+  
   const priceData = stats?.priceRanges || [];
   const recentApartments = apartments.slice(0, 6);
+  
+  // Вычисляем наличие удобств
+  const featuresData = apartments && apartments.length > 0 ? [
+    { feature: 'Мебель', percent: Math.round((apartments.filter(a => a.has_furniture === true).length / apartments.length) * 100) || 0 },
+    { feature: 'Техника', percent: Math.round((apartments.filter(a => a.has_appliances === true).length / apartments.length) * 100) || 0 },
+    { feature: 'Интернет', percent: Math.round((apartments.filter(a => a.has_internet === true).length / apartments.length) * 100) || 0 },
+    { feature: 'Парковка', percent: Math.round((apartments.filter(a => a.has_parking === true).length / apartments.length) * 100) || 0 },
+    { feature: 'Лифт', percent: Math.round((apartments.filter(a => a.has_elevator === true).length / apartments.length) * 100) || 0 },
+    { feature: 'Балкон', percent: Math.round((apartments.filter(a => a.has_balcony === true).length / apartments.length) * 100) || 0 },
+  ].filter(item => item.percent >= 0) : [];
+
+  // Вычисляем значения для карточек статистики
+  const avgPrice = (() => {
+    const price = stats?.avg_price || stats?.avgPrice || 0;
+    return price && !isNaN(price) ? price : 0;
+  })();
+  
+  const avgArea = (() => {
+    const area = stats?.avg_area || stats?.avgArea || 0;
+    return area && !isNaN(area) ? area.toFixed(1) : '0';
+  })();
+  
+  const pricePerMeter = (() => {
+    const price = stats?.avg_price || stats?.avgPrice || 0;
+    const area = stats?.avg_area || stats?.avgArea || 0;
+    if (price && area && !isNaN(price) && !isNaN(area) && area > 0) {
+      return Math.round(price / area);
+    }
+    return stats?.pricePerMeter || 0;
+  })();
 
   return (
     <div className="dashboard">
@@ -53,21 +94,21 @@ const Dashboard = () => {
         />
         <StatCard
           title="Средняя цена"
-          value={formatPrice(stats?.avgPrice || 0)}
+          value={formatPrice(avgPrice)}
           suffix="₽/мес"
           icon="◈"
           color="purple"
         />
         <StatCard
           title="Средняя площадь"
-          value={stats?.avgArea || 0}
+          value={avgArea}
           suffix="м²"
           icon="◐"
           color="pink"
         />
         <StatCard
           title="Цена за м²"
-          value={formatPrice(stats?.pricePerMeter || 0)}
+          value={formatPrice(pricePerMeter)}
           suffix="₽"
           icon="◉"
           color="green"
@@ -166,6 +207,35 @@ const Dashboard = () => {
             </ResponsiveContainer>
           </div>
         </div>
+
+        <div className="chart-card">
+          <h3>Наличие удобств</h3>
+          <div className="chart-container">
+            {featuresData.length > 0 ? (
+              <div className="features-list">
+                {featuresData.map((item, index) => (
+                  <div key={item.feature} className="feature-item">
+                    <div className="feature-header">
+                      <span className="feature-name">{item.feature}</span>
+                      <span className="feature-percent">{item.percent}%</span>
+                    </div>
+                    <div className="feature-bar">
+                      <div 
+                        className="feature-bar-fill" 
+                        style={{ 
+                          width: `${item.percent}%`,
+                          background: COLORS[index % COLORS.length]
+                        }}
+                      />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="no-data">Нет данных</div>
+            )}
+          </div>
+        </div>
       </div>
 
       {/* Recent Apartments */}
@@ -247,7 +317,14 @@ const DashboardSkeleton = () => (
 );
 
 const formatPrice = (price) => {
-  return new Intl.NumberFormat('ru-RU').format(price);
+  if (!price || isNaN(price) || price === null || price === undefined) {
+    return '0';
+  }
+  const numPrice = typeof price === 'string' ? parseFloat(price) : price;
+  if (isNaN(numPrice)) {
+    return '0';
+  }
+  return new Intl.NumberFormat('ru-RU').format(numPrice);
 };
 
 export default Dashboard;

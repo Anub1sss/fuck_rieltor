@@ -435,15 +435,279 @@ async function parseCian() {
     }
 }
 
+async function getAvitoApartmentDetails(page, url) {
+    try {
+        console.log(`  🔍 Открываю детальную страницу: ${url}`);
+        await page.goto(url, { waitUntil: 'networkidle', timeout: 30000 });
+        await page.waitForTimeout(2000);
+        
+        const details = {
+            description: '',
+            contact_phone: '',
+            contact_name: '',
+            photos: [],
+            building_year: null,
+            building_type: null,
+            living_area: null,
+            kitchen_area: null,
+            deposit: null,
+            commission: null,
+            utilities_included: false,
+            rental_period: null,
+            metro_distance: null,
+            metro_transport: null,
+            published_date: null,
+            district: null,
+            has_furniture: false,
+            has_appliances: false,
+            has_internet: false,
+            has_parking: false,
+            has_elevator: false,
+            has_balcony: false,
+            features: []
+        };
+        
+        // Описание
+        const descriptionEl = await page.$('[data-marker="item-view/item-description"]').catch(() => null) ||
+                              await page.$('.item-description-text').catch(() => null);
+        if (descriptionEl) {
+            details.description = await descriptionEl.textContent().catch(() => '');
+        }
+        
+        // Фотографии - получаем все фото с детальной страницы
+        details.photos = await page.evaluate(() => {
+            const photoUrls = [];
+            // Ищем все изображения в галерее
+            const galleryImgs = document.querySelectorAll('div[data-marker="image-frame"] img, .gallery-img img, img[data-marker="image-frame/image"]');
+            galleryImgs.forEach(img => {
+                let src = img.getAttribute('src') || img.getAttribute('data-src') || img.getAttribute('data-url');
+                if (src) {
+                    // Убираем параметры для получения оригинального размера
+                    src = src.split('?')[0];
+                    if (src.includes('img.avito.st') || src.includes('avito.ru')) {
+                        const fullSrc = src.startsWith('//') ? `https:${src}` :
+                                      src.startsWith('http') ? src : `https:${src}`;
+                        if (!photoUrls.includes(fullSrc)) {
+                            photoUrls.push(fullSrc);
+                        }
+                    }
+                }
+            });
+            // Также проверяем data-attribute с URL
+            const dataImages = document.querySelectorAll('[data-image]');
+            dataImages.forEach(el => {
+                const dataUrl = el.getAttribute('data-image');
+                if (dataUrl && dataUrl.includes('img.avito.st')) {
+                    const fullSrc = dataUrl.startsWith('//') ? `https:${dataUrl}` :
+                                  dataUrl.startsWith('http') ? dataUrl : `https:${dataUrl}`;
+                    if (!photoUrls.includes(fullSrc)) {
+                        photoUrls.push(fullSrc);
+                    }
+                }
+            });
+            return photoUrls.slice(0, 20); // До 20 фотографий
+        }).catch(() => []);
+        
+        // Контактная информация
+        const phoneEl = await page.$('a[data-marker="item-phone-button/phone"]').catch(() => null) ||
+                        await page.$('[data-marker="phone-popup/phone"]').catch(() => null);
+        if (phoneEl) {
+            const phoneHref = await phoneEl.getAttribute('href').catch(() => '');
+            details.contact_phone = phoneHref.replace('tel:', '').trim();
+        }
+        
+        // Имя владельца
+        const ownerEl = await page.$('[data-marker="seller-info/name"]').catch(() => null) ||
+                        await page.$('.seller-info-name').catch(() => null);
+        if (ownerEl) {
+            details.contact_name = await ownerEl.textContent().catch(() => '');
+        }
+        
+        // Проверяем, собственник или агент
+        const ownerType = await page.evaluate(() => {
+            const text = document.body.textContent || '';
+            if (text.includes('Собственник') || text.includes('Владелец')) return true;
+            if (text.includes('Агент') || text.includes('Агентство')) return false;
+            return true; // По умолчанию считаем собственником
+        }).catch(() => true);
+        details.is_owner = ownerType;
+        
+        // Параметры квартиры
+        const params = await page.evaluate(() => {
+            const paramsObj = {};
+            const paramItems = document.querySelectorAll('[data-marker="item-params/item"]');
+            paramItems.forEach(item => {
+                const label = item.querySelector('[data-marker="item-params/label"]')?.textContent?.trim() || '';
+                const value = item.querySelector('[data-marker="item-params/value"]')?.textContent?.trim() || '';
+                if (label && value) {
+                    paramsObj[label.toLowerCase()] = value;
+                }
+            });
+            return paramsObj;
+        }).catch(() => ({}));
+        
+        // Год постройки
+        if (params['год постройки'] || params['год']) {
+            const yearMatch = (params['год постройки'] || params['год']).match(/(\d{4})/);
+            if (yearMatch) details.building_year = parseInt(yearMatch[1]);
+        }
+        
+        // Тип дома
+        if (params['тип дома'] || params['материал стен']) {
+            const type = (params['тип дома'] || params['материал стен']).toLowerCase();
+            if (type.includes('кирпич')) details.building_type = 'кирпич';
+            else if (type.includes('панель')) details.building_type = 'панель';
+            else if (type.includes('монолит')) details.building_type = 'монолит';
+            else if (type.includes('блочн')) details.building_type = 'блочный';
+            else details.building_type = type;
+        }
+        
+        // Жилая площадь
+        if (params['жилая площадь'] || params['жилая']) {
+            const livingMatch = (params['жилая площадь'] || params['жилая']).match(/(\d+[.,]?\d*)/);
+            if (livingMatch) details.living_area = parseFloat(livingMatch[1].replace(',', '.'));
+        }
+        
+        // Площадь кухни
+        if (params['площадь кухни'] || params['кухня']) {
+            const kitchenMatch = (params['площадь кухни'] || params['кухня']).match(/(\d+[.,]?\d*)/);
+            if (kitchenMatch) details.kitchen_area = parseFloat(kitchenMatch[1].replace(',', '.'));
+        }
+        
+        // Условия аренды
+        const conditions = await page.evaluate(() => {
+            const conditionsObj = {};
+            const conditionItems = document.querySelectorAll('[data-marker="item-conditions/item"]');
+            conditionItems.forEach(item => {
+                const label = item.querySelector('[data-marker="item-conditions/label"]')?.textContent?.trim() || '';
+                const value = item.querySelector('[data-marker="item-conditions/value"]')?.textContent?.trim() || '';
+                if (label && value) {
+                    conditionsObj[label.toLowerCase()] = value;
+                }
+            });
+            return conditionsObj;
+        }).catch(() => ({}));
+        
+        // Залог
+        if (conditions['залог'] || conditions['депозит']) {
+            const depositText = (conditions['залог'] || conditions['депозит']).replace(/[^\d]/g, '');
+            if (depositText) details.deposit = parseFloat(depositText);
+        }
+        
+        // Комиссия
+        if (conditions['комиссия']) {
+            const commissionText = conditions['комиссия'].toLowerCase();
+            if (commissionText.includes('нет') || commissionText.includes('без')) {
+                details.commission = 0;
+            } else {
+                const commMatch = conditions['комиссия'].match(/(\d+)/);
+                if (commMatch) details.commission = parseFloat(commMatch[1]);
+            }
+        }
+        
+        // ЖКУ включены
+        const utilitiesText = await page.evaluate(() => {
+            const text = document.body.textContent || '';
+            return text.toLowerCase();
+        }).catch(() => '');
+        details.utilities_included = utilitiesText.includes('жку включены') || 
+                                     utilitiesText.includes('коммунальные включены');
+        
+        // Срок аренды
+        if (conditions['срок аренды'] || conditions['срок']) {
+            details.rental_period = conditions['срок аренды'] || conditions['срок'];
+        }
+        
+        // Метро - расстояние и транспорт
+        const metroInfo = await page.evaluate(() => {
+            const metroEl = document.querySelector('[data-marker="item-address/metro"]');
+            if (metroEl) {
+                const text = metroEl.textContent || '';
+                const distanceMatch = text.match(/(\d+)\s*(мин|минут)/);
+                const transportMatch = text.match(/(пешком|транспортом|на машине)/i);
+                return {
+                    station: text.split(',')[0]?.trim() || '',
+                    distance: distanceMatch ? `${distanceMatch[1]} ${distanceMatch[2]}` : null,
+                    transport: transportMatch ? transportMatch[1] : 'пешком'
+                };
+            }
+            return { station: '', distance: null, transport: null };
+        }).catch(() => ({ station: '', distance: null, transport: null }));
+        
+        details.metro_distance = metroInfo.distance;
+        details.metro_transport = metroInfo.transport;
+        
+        // Дата публикации
+        const publishedEl = await page.$('[data-marker="item-view/item-date"]').catch(() => null);
+        if (publishedEl) {
+            details.published_date = await publishedEl.textContent().catch(() => '');
+        }
+        
+        // Район
+        const districtEl = await page.$('[data-marker="item-address/district"]').catch(() => null);
+        if (districtEl) {
+            details.district = await districtEl.textContent().catch(() => '');
+        }
+        
+        // Удобства из описания
+        const fullText = (details.description || '').toLowerCase();
+        details.has_furniture = fullText.includes('мебель') || fullText.includes('меблирован');
+        details.has_appliances = fullText.includes('техника') || fullText.includes('холодильник') || 
+                                 fullText.includes('стиральная') || fullText.includes('посудомоечная') ||
+                                 fullText.includes('микроволнов') || fullText.includes('кондиционер');
+        details.has_internet = fullText.includes('интернет') || fullText.includes('wi-fi') || fullText.includes('wifi');
+        details.has_parking = fullText.includes('парковк') || fullText.includes('гараж') || fullText.includes('стоянк');
+        details.has_elevator = fullText.includes('лифт');
+        details.has_balcony = fullText.includes('балкон') || fullText.includes('лоджия') || fullText.includes('терраса');
+        
+        // Список удобств
+        if (details.has_furniture) details.features.push('мебель');
+        if (details.has_appliances) details.features.push('техника');
+        if (details.has_internet) details.features.push('интернет');
+        if (details.has_parking) details.features.push('парковка');
+        if (details.has_elevator) details.features.push('лифт');
+        if (details.has_balcony) details.features.push('балкон');
+        
+        return details;
+    } catch (e) {
+        console.error(`  ⚠️  Ошибка при парсинге детальной страницы ${url}:`, e.message);
+        return {
+            description: '',
+            contact_phone: '',
+            contact_name: '',
+            photos: [],
+            building_year: null,
+            building_type: null,
+            living_area: null,
+            kitchen_area: null,
+            deposit: null,
+            commission: null,
+            utilities_included: false,
+            rental_period: null,
+            metro_distance: null,
+            metro_transport: null,
+            published_date: null,
+            district: null,
+            has_furniture: false,
+            has_appliances: false,
+            has_internet: false,
+            has_parking: false,
+            has_elevator: false,
+            has_balcony: false,
+            features: []
+        };
+    }
+}
+
 async function parseAvito() {
     const { context } = await initBrowser();
     const page = await context.newPage();
     
     try {
-        const baseUrl = 'https://www.avito.ru/moskva/kvartiry/sdam/na_dlitelnyy_srok/bez_komissii-ASgBAgICA0SSA8gQ8AeQUp74DgI';
+        const baseUrl = 'https://www.avito.ru/moskva/kvartiry/sdam/na_dlitelnyy_srok/bez_komissii-ASgBAgICA0SSA8gQ8AeQUp74DgI?context=H4sIAAAAAAAA_wFNALL_YToyOntzOjg6ImZyb21QYWdlIjtzOjEyOiJyZWNlbnRTZWFyY2giO3M6OToiZnJvbV9wYWdlIjtzOjEyOiJyZWNlbnRTZWFyY2giO32YQ9UcTQAAAA';
         
         let allApartments = [];
-        const maxPages = 3; 
+        const maxPages = 5; // Увеличиваем до 5 страниц 
         
         
         for (let pageNum = 1; pageNum <= maxPages; pageNum++) {
@@ -452,7 +716,8 @@ async function parseAvito() {
             
             let pageUrl = baseUrl;
             if (pageNum > 1) {
-                pageUrl = `${baseUrl}?p=${pageNum}`;
+                // Правильный формат URL для страниц: добавляем &p= в конец
+                pageUrl = `${baseUrl}&p=${pageNum}`;
             }
             
             console.log(`🌐 Открываю URL: ${pageUrl}`);
@@ -540,17 +805,25 @@ async function parseAvito() {
                 
                 
                 const price = await item.evaluate(el => {
-                    
+                    // Метод 1: Из meta itemprop="price"
                     const priceMeta = el.querySelector('meta[itemprop="price"]');
                     if (priceMeta) {
                         const priceValue = priceMeta.getAttribute('content');
                         if (priceValue) return parseFloat(priceValue);
                     }
                     
+                    // Метод 2: Из data-marker="item-price"
                     const priceEl = el.querySelector('[data-marker="item-price"]');
                     if (priceEl) {
-                        const text = priceEl.textContent.trim();
+                        // Сначала проверяем meta внутри priceEl
+                        const metaPrice = priceEl.querySelector('meta[itemprop="price"]');
+                        if (metaPrice) {
+                            const metaValue = metaPrice.getAttribute('content');
+                            if (metaValue) return parseFloat(metaValue);
+                        }
                         
+                        // Затем из текста
+                        const text = priceEl.textContent.trim();
                         const match = text.match(/(\d+[\s\u00A0]*\d*)/);
                         if (match) {
                             return parseFloat(match[1].replace(/[\s\u00A0]/g, ''));
@@ -563,14 +836,33 @@ async function parseAvito() {
                 const metro = await item.evaluate(el => {
                     const addressEl = el.querySelector('[data-marker="item-address"]');
                     if (addressEl) {
+                        // Ищем метро в структуре geo-root
+                        const geoRoot = addressEl.querySelector('[data-marker="item-location"]');
+                        if (geoRoot) {
+                            // Ищем название станции метро (обычно в span после иконки)
+                            const metroSpans = geoRoot.querySelectorAll('span');
+                            for (const span of metroSpans) {
+                                const text = span.textContent.trim();
+                                // Пропускаем пустые, иконки и время
+                                if (text && !text.includes('мин.') && !text.includes('ул.') && 
+                                    !text.includes('пр.') && text.length > 2 && 
+                                    !text.match(/^\d+[А-Яа-я]/)) {
+                                    // Проверяем, что это похоже на название станции
+                                    if (text.match(/^[А-ЯЁ][а-яё]+/)) {
+                                        return text;
+                                    }
+                                }
+                            }
+                        }
                         
+                        // Альтернативный метод: ищем в тексте
                         const text = addressEl.textContent;
-                        
                         const lines = text.split('\n');
                         for (const line of lines) {
                             if (line.includes('мин.') || line.match(/^[А-ЯЁ][а-яё]+/)) {
                                 const metroMatch = line.match(/([А-ЯЁ][а-яё]+(?:\s+[А-ЯЁ][а-яё]+)*)/);
-                                if (metroMatch && !line.includes('ул.') && !line.includes('пр.')) {
+                                if (metroMatch && !line.includes('ул.') && !line.includes('пр.') && 
+                                    !line.includes('мин.')) {
                                     return metroMatch[1].trim();
                                 }
                             }
@@ -583,6 +875,17 @@ async function parseAvito() {
                 const address = await item.evaluate(el => {
                     const addressEl = el.querySelector('[data-marker="item-address"]');
                     if (addressEl) {
+                        const geoRoot = addressEl.querySelector('[data-marker="item-location"]');
+                        if (geoRoot) {
+                            const streetLink = geoRoot.querySelector('a[data-marker="street_link"]');
+                            const houseLink = geoRoot.querySelector('a[data-marker="house_link"]');
+                            const parts = [];
+                            if (streetLink) parts.push(streetLink.textContent.trim());
+                            if (houseLink) parts.push(houseLink.textContent.trim());
+                            return parts.join(', ');
+                        }
+                        
+                        // Альтернативный метод
                         const streetLink = addressEl.querySelector('a[data-marker="street_link"]');
                         const houseLink = addressEl.querySelector('a[data-marker="house_link"]');
                         const parts = [];
@@ -595,53 +898,164 @@ async function parseAvito() {
                 
                 
                 const description = await item.evaluate(el => {
-                    const descEl = el.querySelector('[data-marker="item-description"]') ||
-                                 el.querySelector('p[style*="max-lines"]');
-                    return descEl ? descEl.textContent.trim() : '';
+                    // Ищем описание в разных местах
+                    let descText = '';
+                    
+                    // Метод 1: data-marker="item-line" (описание внизу карточки)
+                    const descEl = el.querySelector('[data-marker="item-line"]') ||
+                                 el.querySelector('p[data-marker="item-line"]');
+                    if (descEl) {
+                        descText = descEl.textContent.trim();
+                    }
+                    
+                    // Метод 2: meta itemprop="description"
+                    if (!descText) {
+                        const metaDesc = el.querySelector('meta[itemprop="description"]');
+                        if (metaDesc) {
+                            descText = metaDesc.getAttribute('content') || '';
+                        }
+                    }
+                    
+                    // Метод 3: Ищем в тексте параграфов
+                    if (!descText) {
+                        const paragraphs = el.querySelectorAll('p');
+                        for (const p of paragraphs) {
+                            const text = p.textContent.trim();
+                            if (text.length > 50 && !text.includes('₽') && !text.includes('м²')) {
+                                descText = text;
+                                break;
+                            }
+                        }
+                    }
+                    
+                    return descText;
                 }).catch(() => '');
                 
                 
-                const photos = await item.evaluate(el => {
-                    const imgs = el.querySelectorAll('img.photo-slider-image-cD891, img[alt*="квартира"]');
+                // Получаем базовые фото со списка - используем правильные селекторы
+                let photos = await item.evaluate(el => {
                     const photoUrls = [];
-                    imgs.forEach(img => {
-                        const src = img.getAttribute('src') || img.getAttribute('data-src');
-                        if (src && (src.includes('img.avito.st') || src.startsWith('http'))) {
-                            const fullSrc = src.startsWith('//') ? `https:${src}` :
-                                          src.startsWith('http') ? src : `https:${src}`;
-                            if (!photoUrls.includes(fullSrc)) {
-                                photoUrls.push(fullSrc);
+                    
+                    // Метод 1: Из data-marker="slider-image/image-..."
+                    const sliderItems = el.querySelectorAll('[data-marker^="slider-image/image-"]');
+                    sliderItems.forEach(item => {
+                        const dataMarker = item.getAttribute('data-marker');
+                        if (dataMarker) {
+                            // Извлекаем URL из data-marker: slider-image/image-https://...
+                            const urlMatch = dataMarker.match(/image-(https?:\/\/[^\s]+)/);
+                            if (urlMatch) {
+                                let url = urlMatch[1];
+                                // Убираем параметры для получения оригинального размера
+                                url = url.split('?')[0];
+                                if (!photoUrls.includes(url)) {
+                                    photoUrls.push(url);
+                                }
                             }
                         }
                     });
-                    return photoUrls.slice(0, 10);
+                    
+                    // Метод 2: Из img.photo-slider-image-cD891
+                    const imgs = el.querySelectorAll('img.photo-slider-image-cD891');
+                    imgs.forEach(img => {
+                        let src = img.getAttribute('src') || img.getAttribute('data-src');
+                        if (src) {
+                            // Убираем параметры и получаем оригинальный размер
+                            src = src.split('?')[0];
+                            // Убираем размеры из URL (например, /208w, /236w и т.д.)
+                            src = src.replace(/\/\d+w$/, '');
+                            if (src.includes('img.avito.st') || src.startsWith('http')) {
+                                const fullSrc = src.startsWith('//') ? `https:${src}` :
+                                              src.startsWith('http') ? src : `https:${src}`;
+                                if (!photoUrls.includes(fullSrc)) {
+                                    photoUrls.push(fullSrc);
+                                }
+                            }
+                        }
+                    });
+                    
+                    return photoUrls.slice(0, 10); // Базовые фото со списка
                 }).catch(() => []);
                 
+                // Парсим детальную страницу для получения расширенной информации
+                console.log(`  📋 Парсинг детальной страницы для ID=${externalId}...`);
+                const details = await getAvitoApartmentDetails(page, fullUrl);
                 
-                const descText = (description || '').toLowerCase();
-                const hasFurniture = descText.includes('мебель') || descText.includes('меблирован');
-                const hasAppliances = descText.includes('техника') || descText.includes('холодильник') || 
-                                     descText.includes('стиральная') || descText.includes('посудомоечная') ||
-                                     descText.includes('микроволнов') || descText.includes('кондиционер');
-                const hasInternet = descText.includes('интернет') || descText.includes('wi-fi');
-                const hasParking = descText.includes('парковк') || descText.includes('гараж');
-                const hasElevator = descText.includes('лифт');
-                const hasBalcony = descText.includes('балкон') || descText.includes('лоджия');
+                // Парсим дополнительные данные со списка, если их нет в детальной странице
+                // Расстояние до метро и транспорт
+                if (!details.metro_distance) {
+                    const metroDistanceText = await item.evaluate(el => {
+                        const addressEl = el.querySelector('[data-marker="item-address"]');
+                        if (addressEl) {
+                            const geoRoot = addressEl.querySelector('[data-marker="item-location"]');
+                            if (geoRoot) {
+                                const text = geoRoot.textContent || '';
+                                const distanceMatch = text.match(/(\d+[–-]\d+|\d+)\s*(мин|минут)/);
+                                if (distanceMatch) {
+                                    return distanceMatch[0];
+                                }
+                            }
+                        }
+                        return null;
+                    }).catch(() => null);
+                    if (metroDistanceText) {
+                        details.metro_distance = metroDistanceText;
+                    }
+                }
                 
-                let buildingType = null;
-                if (descText.includes('кирпич')) buildingType = 'кирпич';
-                else if (descText.includes('панель')) buildingType = 'панель';
-                else if (descText.includes('монолит')) buildingType = 'монолит';
-                else if (descText.includes('блочн')) buildingType = 'блочный';
+                // Условия аренды со списка (Без залога, Без комиссии, ЖКУ)
+                const conditionsText = await item.evaluate(el => {
+                    const paramsEl = el.querySelector('[data-marker="item-specific-params"]');
+                    return paramsEl ? paramsEl.textContent.trim() : '';
+                }).catch(() => '');
                 
-                const features = [];
-                if (hasFurniture) features.push('мебель');
-                if (hasAppliances) features.push('техника');
-                if (hasInternet) features.push('интернет');
-                if (hasParking) features.push('парковка');
-                if (hasElevator) features.push('лифт');
-                if (hasBalcony) features.push('балкон');
+                if (conditionsText) {
+                    const condLower = conditionsText.toLowerCase();
+                    // Залог
+                    if (condLower.includes('без залога') || condLower.includes('залог')) {
+                        if (!details.deposit && !condLower.includes('без залога')) {
+                            const depositMatch = conditionsText.match(/залог[:\s]+(\d+[\s\u00A0]*\d*)/i);
+                            if (depositMatch) {
+                                details.deposit = parseFloat(depositMatch[1].replace(/[\s\u00A0]/g, ''));
+                            }
+                        }
+                    }
+                    // Комиссия
+                    if (condLower.includes('без комиссии')) {
+                        details.commission = 0;
+                    }
+                    // ЖКУ
+                    if (condLower.includes('жку')) {
+                        const utilitiesMatch = conditionsText.match(/жку[:\s]+(\d+[\s\u00A0]*\d*)/i);
+                        if (utilitiesMatch) {
+                            details.utilities_included = false; // Указана сумма, значит не включены
+                        } else if (condLower.includes('жку включены')) {
+                            details.utilities_included = true;
+                        }
+                    }
+                }
                 
+                // Дата публикации
+                if (!details.published_date) {
+                    const dateText = await item.evaluate(el => {
+                        const dateEl = el.querySelector('[data-marker="item-date"]');
+                        return dateEl ? dateEl.textContent.trim() : '';
+                    }).catch(() => '');
+                    if (dateText) {
+                        details.published_date = dateText;
+                    }
+                }
+                
+                // Объединяем фото: сначала с детальной страницы, потом со списка
+                if (details.photos && details.photos.length > 0) {
+                    photos = [...details.photos, ...photos.filter(p => !details.photos.includes(p))].slice(0, 20);
+                }
+                
+                
+                // Используем данные с детальной страницы, если они есть
+                const finalDescription = details.description || description;
+                const descText = (finalDescription || '').toLowerCase();
+                
+                // Объединяем данные со списка и детальной страницы
                 apartments.push({
                     external_id: externalId,
                     url: fullUrl,
@@ -649,22 +1063,35 @@ async function parseAvito() {
                     area: area,
                     rooms: rooms,
                     floor: floor,
-                    total_floors: totalFloors,
-                    metro_station: metro,
+                    total_floors: details.total_floors || totalFloors,
+                    district: details.district || '',
+                    metro_station: metro || details.metro_station || '',
+                    metro_distance: details.metro_distance || null,
+                    metro_transport: details.metro_transport || null,
                     address: address,
                     title: title || `${area ? area + ' м²' : ''} ${rooms !== null ? rooms + '-комн.' : 'квартира'}`,
-                    description: description,
+                    description: finalDescription,
                     photos: photos,
-                    is_owner: true,
+                    contact_phone: details.contact_phone || '',
+                    contact_name: details.contact_name || '',
+                    is_owner: details.is_owner !== undefined ? details.is_owner : true,
                     no_commission: true,
-                    building_type: buildingType,
-                    has_furniture: hasFurniture,
-                    has_appliances: hasAppliances,
-                    has_internet: hasInternet,
-                    has_parking: hasParking,
-                    has_elevator: hasElevator,
-                    has_balcony: hasBalcony,
-                    features: features,
+                    building_year: details.building_year || null,
+                    building_type: details.building_type || null,
+                    living_area: details.living_area || null,
+                    kitchen_area: details.kitchen_area || null,
+                    deposit: details.deposit || null,
+                    commission: details.commission || null,
+                    utilities_included: details.utilities_included || false,
+                    rental_period: details.rental_period || null,
+                    published_date: details.published_date || null,
+                    has_furniture: details.has_furniture || false,
+                    has_appliances: details.has_appliances || false,
+                    has_internet: details.has_internet || false,
+                    has_parking: details.has_parking || false,
+                    has_elevator: details.has_elevator || false,
+                    has_balcony: details.has_balcony || false,
+                    features: details.features || [],
                 });
                 
                 console.log(`  ✅ ID=${externalId}, Цена=${price}₽, Площадь=${area}м², Комнаты=${rooms}, Этаж=${floor}/${totalFloors}`);

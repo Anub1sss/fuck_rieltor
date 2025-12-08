@@ -9,8 +9,40 @@ const api = axios.create({
 
 export const apartmentService = {
   getAll: async (params = {}) => {
-    const response = await api.get('/apartments/', { params });
-    return response.data;
+    let allResults = [];
+    let nextUrl = '/apartments/';
+    let hasMore = true;
+    let isFirstRequest = true;
+    
+    // Получаем все страницы, если есть пагинация
+    while (hasMore) {
+      const requestParams = isFirstRequest ? params : {};
+      const response = await api.get(nextUrl, { params: requestParams });
+      const data = response.data;
+      
+      // Если это пагинированный ответ DRF
+      if (data.results && Array.isArray(data.results)) {
+        allResults = [...allResults, ...data.results];
+        hasMore = !!data.next;
+        if (data.next) {
+          // Извлекаем путь из полного URL (может быть полный URL или относительный)
+          if (data.next.startsWith('http')) {
+            // Полный URL - извлекаем путь после baseURL
+            const url = new URL(data.next);
+            nextUrl = url.pathname + url.search;
+          } else {
+            // Относительный путь
+            nextUrl = data.next;
+          }
+        }
+        isFirstRequest = false;
+      } else {
+        // Если это не пагинированный ответ, возвращаем как есть
+        return Array.isArray(data) ? data : [];
+      }
+    }
+    
+    return allResults;
   },
 
   getById: async (id) => {
@@ -21,13 +53,51 @@ export const apartmentService = {
   getStats: async () => {
     try {
       const response = await api.get('/apartments/stats/');
-      return response.data;
+      const data = response.data;
+      
+      // Получаем все квартиры для вычисления недостающих данных
+      const apartments = await apartmentService.getAll();
+      
+      // Нормализуем формат данных (API возвращает snake_case, но мы используем camelCase)
+      const normalized = {
+        total: data.total || 0,
+        avgPrice: data.avg_price || data.avgPrice || 0,
+        avgArea: data.avg_area || data.avgArea || 0,
+        pricePerMeter: data.pricePerMeter || (data.avg_price && data.avg_area ? Math.round(data.avg_price / data.avg_area) : 0),
+        byRooms: data.byRooms || calculateByRooms(apartments),
+        bySource: data.by_source || data.bySource || {},
+        priceRanges: data.priceRanges || calculatePriceRanges(apartments),
+      };
+      
+      return normalized;
     } catch (error) {
       // Если эндпоинт не существует, вычисляем статистику из списка
       const apartments = await apartmentService.getAll();
       return calculateStats(apartments);
     }
   },
+};
+
+const calculateByRooms = (apartments) => {
+  if (!apartments || apartments.length === 0) return {};
+  const byRooms = {};
+  apartments.forEach(a => {
+    const rooms = a.rooms ?? null;
+    const key = rooms === 0 ? 'Студия' : rooms === null ? 'Н/Д' : `${rooms}-комн.`;
+    byRooms[key] = (byRooms[key] || 0) + 1;
+  });
+  return byRooms;
+};
+
+const calculatePriceRanges = (apartments) => {
+  if (!apartments || apartments.length === 0) return [];
+  return [
+    { range: 'до 50к', count: apartments.filter(a => (a.price || 0) < 50000).length },
+    { range: '50-80к', count: apartments.filter(a => (a.price || 0) >= 50000 && (a.price || 0) < 80000).length },
+    { range: '80-120к', count: apartments.filter(a => (a.price || 0) >= 80000 && (a.price || 0) < 120000).length },
+    { range: '120-200к', count: apartments.filter(a => (a.price || 0) >= 120000 && (a.price || 0) < 200000).length },
+    { range: 'от 200к', count: apartments.filter(a => (a.price || 0) >= 200000).length },
+  ];
 };
 
 const calculateStats = (apartments) => {
