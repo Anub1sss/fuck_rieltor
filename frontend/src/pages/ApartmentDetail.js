@@ -173,11 +173,86 @@ const ApartmentDetail = () => {
             </div>
           </div>
 
-          {apartment.url && (
-            <a href={apartment.url} target="_blank" rel="noopener noreferrer" className="detail-source-btn">
-              Открыть на {apartment.source || 'сайте'} →
-            </a>
+          {/* Contact Info */}
+          {(apartment.contact_name || apartment.contact_phone) && (
+            <div className="detail-contact">
+              <h3>Контакты</h3>
+              <div className="contact-info">
+                {apartment.contact_name && (
+                  <div className="contact-item">
+                    <span className="contact-label">Имя:</span>
+                    <span className="contact-value">{apartment.contact_name}</span>
+                  </div>
+                )}
+                {apartment.contact_phone && (
+                  <div className="contact-item">
+                    <span className="contact-label">Телефон:</span>
+                    <a href={`tel:${apartment.contact_phone}`} className="contact-value contact-phone">
+                      {apartment.contact_phone}
+                    </a>
+                  </div>
+                )}
+                {apartment.is_owner !== undefined && (
+                  <div className="contact-item">
+                    <span className="contact-label">Тип:</span>
+                    <span className="contact-value">{apartment.is_owner ? 'Собственник' : 'Агент'}</span>
+                  </div>
+                )}
+              </div>
+            </div>
           )}
+
+          {/* Source Link */}
+          {apartment.url && (
+            <div className="detail-source-section">
+              <a 
+                href={apartment.url} 
+                target="_blank" 
+                rel="noopener noreferrer" 
+                className="detail-source-btn"
+              >
+                <span className="source-btn-icon">🔗</span>
+                <span className="source-btn-text">
+                  Открыть оригинальное объявление на {apartment.source_display || apartment.source || 'сайте'}
+                </span>
+                <span className="source-btn-arrow">→</span>
+              </a>
+              <p className="source-note">Откроется в новой вкладке</p>
+            </div>
+          )}
+
+          {/* Additional Info */}
+          <div className="detail-additional">
+            <h3>Дополнительная информация</h3>
+            <div className="additional-grid">
+              {apartment.published_date && (
+                <div className="additional-item">
+                  <span className="additional-label">Дата публикации:</span>
+                  <span className="additional-value">{apartment.published_date}</span>
+                </div>
+              )}
+              {apartment.created_at && (
+                <div className="additional-item">
+                  <span className="additional-label">Добавлено в систему:</span>
+                  <span className="additional-value">
+                    {new Date(apartment.created_at).toLocaleDateString('ru-RU', {
+                      year: 'numeric',
+                      month: 'long',
+                      day: 'numeric',
+                      hour: '2-digit',
+                      minute: '2-digit'
+                    })}
+                  </span>
+                </div>
+              )}
+              {apartment.is_verified && (
+                <div className="additional-item">
+                  <span className="additional-label">Статус:</span>
+                  <span className="additional-value verified">✓ Проверено</span>
+                </div>
+              )}
+            </div>
+          </div>
         </div>
       </div>
 
