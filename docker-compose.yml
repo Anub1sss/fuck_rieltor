@@ -47,7 +47,7 @@ services:
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
       - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:3000,http://localhost:3001,http://localhost:3002}
-      - PARSER_SERVICE_URL=http://parser:3000
+      - PARSER_SERVICE_URL=http://parser:3001
 
   celery:
     build: .
@@ -85,10 +85,8 @@ services:
 
   parser:
     build: ./parser-service
-    ports:
-      - "3000:3000"
     environment:
-      - PORT=3000
+      - PORT=3001
       - DJANGO_API_URL=http://web:8000/api
     depends_on:
       - web
@@ -97,7 +95,7 @@ services:
   frontend:
     build: ./frontend
     ports:
-      - "3001:3001"
+      - "3002:3001"
     environment:
       - PORT=3001
       - REACT_APP_API_URL=http://localhost:8000/api
@@ -107,7 +105,7 @@ services:
   score-service:
     build: ./score-service
     ports:
-      - "3002:3002"
+      - "3000:3000"
     depends_on:
       - web
     restart: unless-stopped
