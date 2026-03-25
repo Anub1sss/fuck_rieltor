@@ -5,7 +5,6 @@ import Dashboard from './pages/Dashboard';
 import Catalog from './pages/Catalog';
 import ApartmentDetail from './pages/ApartmentDetail';
 import Analytics from './pages/Analytics';
-
 function App() {
   return (
     <Layout>
@@ -20,5 +19,7 @@ function App() {
 }
 
 export default App;
+
+
 
 

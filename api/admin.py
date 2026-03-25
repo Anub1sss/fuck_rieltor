@@ -32,3 +32,5 @@ class ParseLogAdmin(admin.ModelAdmin):
 
 
 
+
+

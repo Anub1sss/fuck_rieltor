@@ -1,0 +1,26 @@
+.score-app__header {
+  padding: 32px 0 8px;
+  border-bottom: 1px solid var(--border-color);
+  margin-bottom: 32px;
+}
+.score-app__container {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 0 24px;
+}
+.score-app__title {
+  font-size: 1.6rem;
+  font-weight: 600;
+  background: var(--gradient-main);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+.score-app__subtitle {
+  color: var(--text-muted);
+  font-size: 0.9rem;
+  margin-top: 4px;
+  margin-bottom: 16px;
+}
+.score-app__main {
+  padding-bottom: 64px;
+}
