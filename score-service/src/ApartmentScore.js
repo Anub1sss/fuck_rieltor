@@ -2,17 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { RadarChart, Radar, PolarGrid, PolarAngleAxis, PolarRadiusAxis, ResponsiveContainer, Tooltip } from 'recharts';
 import './ApartmentScore.css';
 
-function getApiBase() {
-  if (process.env.REACT_APP_API_URL) return process.env.REACT_APP_API_URL;
-  const loc = window.location;
-  // GitHub Codespaces: *.app.github.dev — заменяем порт в домене
-  if (loc.hostname.includes('app.github.dev')) {
-    const apiHost = loc.hostname.replace('-3002.', '-8000.');
-    return `${loc.protocol}//${apiHost}/api`;
-  }
-  return `${loc.protocol}//${loc.hostname}:8000/api`;
-}
-const API = getApiBase() + '/analytics';
+const API = '/api/analytics';
 
 const ApartmentScore = () => {
   const [step, setStep] = useState('form');
