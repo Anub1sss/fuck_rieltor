@@ -49,6 +49,7 @@ services:
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
       - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:3000,http://localhost:3001,http://localhost:3002}
+      - PARSER_SERVICE_URL=http://parser:3000
 
   celery:
     build: .

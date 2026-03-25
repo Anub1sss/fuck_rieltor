@@ -1597,6 +1597,189 @@ app.post('/parse/:source', async (req, res) => {
     }
 });
 
+// Парсинг одной квартиры по прямой ссылке
+app.post('/parse-single', async (req, res) => {
+    const { url } = req.body;
+    if (!url) return res.status(400).json({ error: 'url is required' });
+
+    let source = 'unknown';
+    if (url.includes('cian.ru')) source = 'cian';
+    else if (url.includes('avito.ru')) source = 'avito';
+    else if (url.includes('realty.yandex') || url.includes('realty.ya.ru')) source = 'yandex';
+
+    const { context } = await initBrowser();
+    const page = await context.newPage();
+
+    try {
+        console.log(`[parse-single] Opening: ${url}`);
+        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+        await page.waitForTimeout(3000);
+
+        let data = { source, url };
+
+        if (source === 'cian') {
+            data = await parseCianSingle(page, url);
+        } else if (source === 'avito') {
+            data = await parseAvitoSingle(page, url);
+        } else {
+            data = await parseGenericSingle(page, url);
+        }
+
+        data.source = source;
+        data.url = url;
+        console.log(`[parse-single] Parsed:`, JSON.stringify(data).substring(0, 300));
+        res.json(data);
+    } catch (error) {
+        console.error(`[parse-single] Error:`, error.message);
+        res.status(500).json({ error: error.message });
+    } finally {
+        await page.close();
+    }
+});
+
+async function parseCianSingle(page, url) {
+    const data = {};
+
+    // Название
+    data.title = await page.$eval('h1', el => el.textContent.trim()).catch(() => '');
+
+    // Цена
+    const priceText = await page.$eval('[data-testid="price-amount"]', el => el.textContent).catch(() =>
+        page.$eval('.a10a3f92e9--price_value--lqIK0', el => el.textContent).catch(() => '')
+    );
+    data.price = parseFloat((priceText || '').replace(/[^\d]/g, '')) || null;
+
+    // Параметры из заголовка (2-комн. кв., 54 м², 8/17 эт.)
+    const subtitle = data.title || '';
+    const roomsMatch = subtitle.match(/(\d+)-комн/);
+    data.rooms = roomsMatch ? parseInt(roomsMatch[1]) : (subtitle.includes('Студия') ? 0 : null);
+
+    const areaMatch = subtitle.match(/([\d,.]+)\s*м²/);
+    data.area = areaMatch ? parseFloat(areaMatch[1].replace(',', '.')) : null;
+
+    const floorMatch = subtitle.match(/(\d+)\/(\d+)\s*эт/);
+    if (floorMatch) {
+        data.floor = parseInt(floorMatch[1]);
+        data.total_floors = parseInt(floorMatch[2]);
+    }
+
+    // Метро
+    data.metro_station = await page.$eval('a[data-name="SpecialGeo"] span, [class*="metro"] a', el => el.textContent.trim()).catch(() => '');
+    const metroWalkText = await page.$eval('[class*="underground"]', el => el.textContent).catch(() => '');
+    const walkMatch = metroWalkText.match(/(\d+)\s*мин/);
+    data.metro_distance_min = walkMatch ? parseInt(walkMatch[1]) : null;
+
+    // Адрес
+    data.address = await page.$eval('[data-name="Geo"] span.a10a3f92e9--address--SMU25, [class*="address"]', el => el.textContent.trim()).catch(() => '');
+
+    // Дополнительные параметры из блока характеристик
+    const infoItems = await page.$$eval('[data-testid="object-summary-description-info"] li, [class*="info-section"] li, [data-name="ObjectSummaryDescription"] li', items =>
+        items.map(el => el.textContent.trim())
+    ).catch(() => []);
+
+    for (const item of infoItems) {
+        if (item.includes('Общая')) {
+            const m = item.match(/([\d,.]+)/);
+            if (m && !data.area) data.area = parseFloat(m[1].replace(',', '.'));
+        }
+        if (item.includes('Жилая')) {
+            const m = item.match(/([\d,.]+)/);
+            if (m) data.living_area = parseFloat(m[1].replace(',', '.'));
+        }
+        if (item.includes('Кухня')) {
+            const m = item.match(/([\d,.]+)/);
+            if (m) data.kitchen_area = parseFloat(m[1].replace(',', '.'));
+        }
+        if (item.includes('Потолки') || item.includes('потолк')) {
+            const m = item.match(/([\d,.]+)/);
+            if (m) data.ceiling_height = parseFloat(m[1].replace(',', '.'));
+        }
+        if (item.includes('Санузел')) data.bathroom_type = item.replace('Санузел', '').trim();
+        if (item.includes('Балкон') || item.includes('балкон')) data.has_balcony = true;
+        if (item.includes('Лоджия') || item.includes('лоджия')) data.has_loggia = true;
+    }
+
+    // Тип дома, год
+    const buildingItems = await page.$$eval('[data-name="BtiHouseData"] li, [class*="building-info"] li, [data-name="ObjectFactoidsItem"]', items =>
+        items.map(el => el.textContent.trim())
+    ).catch(() => []);
+
+    for (const item of buildingItems) {
+        if (item.includes('Построен') || item.includes('построен') || item.includes('Год')) {
+            const m = item.match(/(19|20)\d{2}/);
+            if (m) data.building_year = parseInt(m[0]);
+        }
+        if (item.includes('панель')) data.building_type = 'панельный';
+        if (item.includes('монолит') && item.includes('кирпич')) data.building_type = 'монолитно-кирпичный';
+        else if (item.includes('монолит')) data.building_type = 'монолитный';
+        else if (item.includes('кирпич')) data.building_type = 'кирпичный';
+        else if (item.includes('блок')) data.building_type = 'блочный';
+    }
+
+    // Округ — из адреса
+    const districts = ['Центральный','Северный','Северо-Восточный','Восточный','Юго-Восточный','Южный','Юго-Западный','Западный','Северо-Западный','Новомосковский','Троицкий'];
+    for (const d of districts) {
+        if ((data.address || '').includes(d)) { data.district = d; break; }
+    }
+
+    // ЖК
+    data.residential_complex = await page.$eval('[data-name="Parent"] a, [class*="jk-name"] a', el => el.textContent.trim()).catch(() => '');
+
+    return data;
+}
+
+async function parseAvitoSingle(page, url) {
+    const data = {};
+
+    data.title = await page.$eval('h1', el => el.textContent.trim()).catch(() => '');
+
+    const priceText = await page.$eval('[itemprop="price"]', el => el.getAttribute('content')).catch(() =>
+        page.$eval('[data-marker="item-view/item-price"]', el => el.textContent.replace(/[^\d]/g, '')).catch(() => '')
+    );
+    data.price = parseFloat(priceText) || null;
+
+    const subtitle = data.title || '';
+    const roomsMatch = subtitle.match(/(\d+)-комн/);
+    data.rooms = roomsMatch ? parseInt(roomsMatch[1]) : (subtitle.includes('Студия') ? 0 : null);
+    const areaMatch = subtitle.match(/([\d,.]+)\s*м²/);
+    data.area = areaMatch ? parseFloat(areaMatch[1].replace(',', '.')) : null;
+    const floorMatch = subtitle.match(/(\d+)\/(\d+)\s*эт/);
+    if (floorMatch) {
+        data.floor = parseInt(floorMatch[1]);
+        data.total_floors = parseInt(floorMatch[2]);
+    }
+
+    data.address = await page.$eval('[itemprop="address"] span, [data-marker="item-address"] span', el => el.textContent.trim()).catch(() => '');
+
+    const params = await page.$$eval('[class*="params-paramsList"] li', items =>
+        items.map(el => el.textContent.trim())
+    ).catch(() => []);
+    for (const p of params) {
+        if (p.includes('Площадь кухни')) { const m = p.match(/([\d,.]+)/); if (m) data.kitchen_area = parseFloat(m[1].replace(',','.')); }
+        if (p.includes('Жилая площадь')) { const m = p.match(/([\d,.]+)/); if (m) data.living_area = parseFloat(m[1].replace(',','.')); }
+        if (p.includes('Высота потолков')) { const m = p.match(/([\d,.]+)/); if (m) data.ceiling_height = parseFloat(m[1].replace(',','.')); }
+        if (p.includes('Санузел')) data.bathroom_type = p.replace(/.*Санузел\s*/, '').trim();
+        if (p.includes('Балкон') || p.includes('Лоджия')) { data.has_balcony = p.includes('балкон'); data.has_loggia = p.includes('лоджия'); }
+        if (p.includes('Тип дома')) {
+            if (p.includes('панель')) data.building_type = 'панельный';
+            else if (p.includes('монолит') && p.includes('кирпич')) data.building_type = 'монолитно-кирпичный';
+            else if (p.includes('монолит')) data.building_type = 'монолитный';
+            else if (p.includes('кирпич')) data.building_type = 'кирпичный';
+        }
+        if (p.includes('Год постройки')) { const m = p.match(/(19|20)\d{2}/); if (m) data.building_year = parseInt(m[0]); }
+    }
+
+    return data;
+}
+
+async function parseGenericSingle(page, url) {
+    const data = {};
+    data.title = await page.$eval('h1', el => el.textContent.trim()).catch(() => 'Квартира');
+    const priceText = await page.$eval('[itemprop="price"]', el => el.getAttribute('content')).catch(() => '');
+    data.price = parseFloat((priceText || '').replace(/[^\d]/g, '')) || null;
+    return data;
+}
+
 app.get('/health', (req, res) => {
     res.json({ 
         status: 'ok',

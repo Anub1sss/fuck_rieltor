@@ -7,6 +7,7 @@
 - Криминал: прокуратура Москвы, 10 мес 2025 (преступлений на 10 тыс. жит.)
 - Экология, инфраструктура, транспорт: экспертные оценки на основе открытых данных
 """
+import os
 import re
 from decimal import Decimal
 from django.utils import timezone
@@ -959,29 +960,71 @@ def populate_from_existing_apartment(analysis, apartment):
 
 
 def populate_from_url_stub(analysis):
-    """Заглушка — в продакшене тут будет реальный парсинг через parser-service."""
-    analysis.title = f'Квартира ({analysis.source_type})'
-    analysis.price = Decimal('12500000')
-    analysis.area = Decimal('54')
-    analysis.living_area = Decimal('32')
-    analysis.kitchen_area = Decimal('11')
-    analysis.rooms = 2
-    analysis.floor = 8
-    analysis.total_floors = 17
-    analysis.ceiling_height = Decimal('2.75')
-    analysis.district = 'Западный'
-    analysis.metro_station = 'Парк Победы'
-    analysis.metro_distance_min = 10
-    analysis.building_type = 'монолитно-кирпичный'
-    analysis.rc_year_built = 2019
-    analysis.rc_class = 'комфорт'
-    analysis.rc_parking = True
-    analysis.rc_closed_territory = True
-    analysis.rc_playground = True
-    analysis.has_balcony = True
-    analysis.has_loggia = True
-    analysis.bathroom_type = 'раздельный'
-    analysis.renovation_type = 'евроремонт'
-    analysis.has_passenger_elevator = True
-    analysis.has_freight_elevator = True
+    """Парсит реальные данные квартиры через parser-service."""
+    import requests
+    parser_url = os.getenv('PARSER_SERVICE_URL', 'http://localhost:3000')
+
+    try:
+        resp = requests.post(
+            f'{parser_url}/parse-single',
+            json={'url': analysis.source_url},
+            timeout=45,
+        )
+        if resp.status_code == 200:
+            d = resp.json()
+            _apply_parsed_data(analysis, d)
+            analysis.save()
+            return
+    except Exception as e:
+        print(f'[analytics] parser-service error: {e}')
+
+    analysis.title = f'Квартира ({analysis.source_type}) — не удалось спарсить'
     analysis.save()
+
+
+def _apply_parsed_data(analysis, d):
+    """Заполняет поля анализа из dict, полученного от parser-service."""
+    analysis.title = d.get('title') or f'Квартира ({analysis.source_type})'
+    if d.get('price'):
+        analysis.price = Decimal(str(d['price']))
+    if d.get('area'):
+        analysis.area = Decimal(str(d['area']))
+    if d.get('living_area'):
+        analysis.living_area = Decimal(str(d['living_area']))
+    if d.get('kitchen_area'):
+        analysis.kitchen_area = Decimal(str(d['kitchen_area']))
+    if d.get('ceiling_height'):
+        analysis.ceiling_height = Decimal(str(d['ceiling_height']))
+    if d.get('rooms') is not None:
+        analysis.rooms = d['rooms']
+    if d.get('floor'):
+        analysis.floor = d['floor']
+    if d.get('total_floors'):
+        analysis.total_floors = d['total_floors']
+    if d.get('address'):
+        analysis.address = d['address']
+    if d.get('district'):
+        analysis.district = d['district']
+    if d.get('metro_station'):
+        analysis.metro_station = d['metro_station']
+    if d.get('metro_distance_min'):
+        analysis.metro_distance_min = d['metro_distance_min']
+    if d.get('building_type'):
+        analysis.building_type = d['building_type']
+    if d.get('building_year'):
+        analysis.rc_year_built = d['building_year']
+    if d.get('residential_complex'):
+        analysis.residential_complex = d['residential_complex']
+    if d.get('has_balcony'):
+        analysis.has_balcony = True
+    if d.get('has_loggia'):
+        analysis.has_loggia = True
+    if d.get('bathroom_type'):
+        analysis.bathroom_type = d['bathroom_type']
+
+    # Определяем округ из адреса если не спарсился
+    if not analysis.district and analysis.address:
+        for name in DISTRICT_DATA:
+            if name.lower() in analysis.address.lower():
+                analysis.district = name
+                break
