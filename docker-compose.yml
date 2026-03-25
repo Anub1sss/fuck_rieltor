@@ -28,8 +28,6 @@ services:
   web:
     build: .
     command: gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 3 --timeout 120
-    volumes:
-      - .:/app
     ports:
       - "8000:8000"
     depends_on:
@@ -54,8 +52,6 @@ services:
   celery:
     build: .
     command: celery -A config worker --loglevel=info
-    volumes:
-      - .:/app
     depends_on:
       - db
       - redis
@@ -73,8 +69,6 @@ services:
   celery-beat:
     build: .
     command: celery -A config beat --loglevel=info --scheduler django_celery_beat.schedulers:DatabaseScheduler
-    volumes:
-      - .:/app
     depends_on:
       - db
       - redis
@@ -98,8 +92,7 @@ services:
       - DJANGO_API_URL=http://web:8000/api
     depends_on:
       - web
-    volumes:
-      - ./parser-service:/app
+    restart: unless-stopped
 
   frontend:
     build: ./frontend
@@ -110,9 +103,6 @@ services:
       - REACT_APP_API_URL=http://localhost:8000/api
     depends_on:
       - web
-    volumes:
-      - ./frontend/src:/app/src
-      - ./frontend/public:/app/public
 
   score-service:
     build: ./score-service
