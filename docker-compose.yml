@@ -108,6 +108,17 @@ services:
       - ./frontend/src:/app/src
       - ./frontend/public:/app/public
 
+  score-service:
+    build:
+      context: ./score-service
+      args:
+        REACT_APP_API_URL: ${SCORE_API_URL:-http://localhost:8000/api}
+    ports:
+      - "3002:3002"
+    depends_on:
+      - web
+    restart: unless-stopped
+
 volumes:
   postgres_data:
 
