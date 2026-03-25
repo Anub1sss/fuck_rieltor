@@ -10,6 +10,7 @@
 import os
 import re
 from decimal import Decimal
+from django.db import models
 from django.utils import timezone
 from api.models import Apartment
 
@@ -179,15 +180,15 @@ DISTRICT_DATA = {
         'daily': 48,
         'crime_per_10k': 84.4, 'crime_label': 'выше среднего (рост +3.9%)',
         'noise_sources': [],
-        'parks': ['Парк Филатов луг', 'Ульяновский лесопарк'],
+        'parks': ['Парк Филатов луг', 'Ульяновский лесопарк', 'Парк «Первый Московский»', 'Сквер у метро Рассказовка'],
         'price_trend': 'rising',
-        'malls': ['Саларис', 'Новомосковский ТЦ'],
-        'schools': ['Школа №2065', 'Школа №2070'],
-        'kindergartens': ['Д/с «Сказка» Коммунарка'],
+        'malls': ['Саларис', 'Новомосковский ТЦ', 'ТЦ «Первый Московский»', 'ТЦ Орлёнок Московский'],
+        'schools': ['Школа №2065', 'Школа №2070', 'Школа «Летово» (элитная)', 'Школа №2120 Московский', 'Школа №2083 Коммунарка'],
+        'kindergartens': ['Д/с «Сказка» Коммунарка', 'Д/с «Город-парк» Московский', 'Д/с №3 Московский', 'Д/с «Росток» Коммунарка'],
         'schools_total': 45, 'kindergartens_total': 40,
         'price_m2_2020': 130000, 'price_m2_2023': 185000,
-        'clinics': ['Поликлиника Коммунарки'],
-        'fitness': ['DDX Fitness Коммунарка'],
+        'clinics': ['Поликлиника Коммунарки', 'ГКБ №40 Коммунарка (крупнейшая в ТиНАО)', 'Поликлиника г. Московский'],
+        'fitness': ['DDX Fitness Коммунарка', 'Gym Lime Московский', 'Spirit Fitness Саларьево'],
     },
     'Троицкий': {
         'ecology': 88, 'safety': 62, 'infrastructure': 35, 'transport': 30,
@@ -853,13 +854,23 @@ def analyze_apartment(analysis):
         analysis.score_social_infra = _score_social_infra(dd['social'])
         analysis.score_daily_comfort = _score_daily_comfort(dd['daily'])
 
-        # Инфраструктура — реальные данные по округу
-        analysis.nearby_parks = dd.get('parks', [])[:4]
-        analysis.nearby_schools = dd.get('schools', [])[:4]
-        analysis.nearby_kindergartens = dd.get('kindergartens', [])[:3]
-        analysis.nearby_malls = dd.get('malls', [])[:4]
-        analysis.nearby_clinics = dd.get('clinics', [])[:3]
-        analysis.nearby_fitness = dd.get('fitness', [])[:3]
+        # Инфраструктура: спарсенное из объявления + дополнение из справочника округа
+        def _merge_infra(parsed_list, district_list, limit=5):
+            """Объединяет данные из парсера с данными справочника, без дубликатов."""
+            result = list(parsed_list or [])
+            seen_lower = {x.lower() for x in result}
+            for item in (district_list or []):
+                if item.lower() not in seen_lower and len(result) < limit:
+                    result.append(item)
+                    seen_lower.add(item.lower())
+            return result
+
+        analysis.nearby_parks = _merge_infra(analysis.nearby_parks, dd.get('parks', []))
+        analysis.nearby_schools = _merge_infra(analysis.nearby_schools, dd.get('schools', []))
+        analysis.nearby_kindergartens = _merge_infra(analysis.nearby_kindergartens, dd.get('kindergartens', []))
+        analysis.nearby_malls = _merge_infra(analysis.nearby_malls, dd.get('malls', []))
+        analysis.nearby_clinics = _merge_infra(analysis.nearby_clinics, dd.get('clinics', []))
+        analysis.nearby_fitness = _merge_infra(analysis.nearby_fitness, dd.get('fitness', []))
         analysis.schools_total_in_district = dd.get('schools_total')
         analysis.kindergartens_total_in_district = dd.get('kindergartens_total')
 
@@ -961,20 +972,23 @@ def populate_from_existing_apartment(analysis, apartment):
 
 def populate_from_url_stub(analysis):
     """Парсит реальные данные квартиры через parser-service."""
-    import requests
+    import requests as http_requests
     parser_url = os.getenv('PARSER_SERVICE_URL', 'http://localhost:3000')
 
     try:
-        resp = requests.post(
+        resp = http_requests.post(
             f'{parser_url}/parse-single',
             json={'url': analysis.source_url},
-            timeout=45,
+            timeout=60,
         )
         if resp.status_code == 200:
             d = resp.json()
+            print(f'[analytics] parser returned: price={d.get("price")}, area={d.get("area")}, rooms={d.get("rooms")}, title={d.get("title","")[:60]}')
             _apply_parsed_data(analysis, d)
             analysis.save()
             return
+        else:
+            print(f'[analytics] parser-service returned {resp.status_code}: {resp.text[:200]}')
     except Exception as e:
         print(f'[analytics] parser-service error: {e}')
 
@@ -1021,10 +1035,77 @@ def _apply_parsed_data(analysis, d):
         analysis.has_loggia = True
     if d.get('bathroom_type'):
         analysis.bathroom_type = d['bathroom_type']
+    if d.get('description'):
+        analysis.description = d['description'][:2000]
+    if d.get('photos'):
+        analysis.photos = d['photos'][:10]
+    if d.get('nearby_metros'):
+        analysis.nearby_metros = d['nearby_metros']
+    if d.get('nearby_highways'):
+        analysis.nearby_highways = d['nearby_highways']
+    if d.get('mkad_distance_km'):
+        analysis.mkad_distance_km = d['mkad_distance_km']
+
+    # Infrastructure parsed from the listing description
+    if d.get('parsed_schools'):
+        analysis.nearby_schools = d['parsed_schools']
+    if d.get('parsed_kindergartens'):
+        analysis.nearby_kindergartens = d['parsed_kindergartens']
+    if d.get('parsed_parks'):
+        analysis.nearby_parks = d['parsed_parks']
+    if d.get('parsed_malls'):
+        analysis.nearby_malls = d['parsed_malls']
+    if d.get('parsed_clinics'):
+        analysis.nearby_clinics = d['parsed_clinics']
+    if d.get('parsed_fitness'):
+        analysis.nearby_fitness = d['parsed_fitness']
+
+    # RC features from description
+    rc_features = d.get('rc_features', [])
+    if rc_features:
+        analysis.rc_features = rc_features
+        if 'closed_territory' in rc_features:
+            analysis.rc_closed_territory = True
+        if 'playground' in rc_features:
+            analysis.rc_playground = True
+        if 'sports_ground' in rc_features:
+            analysis.rc_sports_ground = True
+        if 'parking' in rc_features:
+            analysis.rc_parking = True
+        if 'underground_parking' in rc_features:
+            analysis.rc_underground_parking = True
+        if 'concierge' in rc_features:
+            analysis.rc_concierge = True
+        if 'dog_walking' in rc_features:
+            analysis.rc_dog_walking = True
+        if 'elevator' in rc_features:
+            analysis.has_passenger_elevator = True
+        if 'freight_elevator' in rc_features:
+            analysis.has_freight_elevator = True
 
     # Определяем округ из адреса если не спарсился
     if not analysis.district and analysis.address:
-        for name in DISTRICT_DATA:
-            if name.lower() in analysis.address.lower():
-                analysis.district = name
-                break
+        analysis.district = _detect_district_from_address(analysis.address)
+
+
+def _detect_district_from_address(address):
+    """Определяет московский округ из адреса по ключевым словам."""
+    addr_lower = address.lower()
+    district_keywords = {
+        'Новомосковский': ['нао', 'новомосковский', 'коммунарка', 'московский,', 'троицк', 'щербинка', 'филатов луг', 'рассказовка', 'саларьево', 'прокшино'],
+        'Троицкий': ['тао', 'троицкий'],
+        'Центральный': ['цао', 'центральный', 'арбат', 'тверск', 'пресненск', 'хамовники', 'басманн'],
+        'Северный': ['сао,', ' сао ', 'северный', 'дмитровск', 'головинск', 'войковск', 'тимирязевск'],
+        'Северо-Восточный': ['свао', 'северо-восточный', 'медведково', 'бибирево', 'алтуфьево', 'отрадное'],
+        'Восточный': ['вао,', ' вао ', 'восточный', 'измайлово', 'перово', 'новогиреево', 'сокольники'],
+        'Юго-Восточный': ['ювао', 'юго-восточный', 'люблино', 'марьино', 'братеево', 'капотня'],
+        'Южный': ['юао,', ' юао ', 'южный', 'чертаново', 'бирюлёво', 'орехово', 'царицыно'],
+        'Юго-Западный': ['юзао', 'юго-западный', 'ясенево', 'тёплый стан', 'коньково', 'беляево'],
+        'Западный': ['зао,', ' зао ', 'западный', 'кунцево', 'крылатское', 'фили', 'давыдково', 'раменки'],
+        'Северо-Западный': ['сзао', 'северо-западный', 'митино', 'тушино', 'строгино', 'щукино'],
+    }
+    for name, keywords in district_keywords.items():
+        for kw in keywords:
+            if kw in addr_lower:
+                return name
+    return ''

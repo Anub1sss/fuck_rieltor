@@ -6,7 +6,6 @@ from api.models import Apartment
 from .models import FamilyProfile, ApartmentAnalysis
 from .serializers import (
     AnalysisRequestSerializer,
-    ApartmentAnalysisListSerializer,
     ApartmentAnalysisDetailSerializer,
 )
 from .services import (
@@ -55,27 +54,27 @@ def create_analysis(request):
     else:
         populate_from_url_stub(analysis)
 
+    analysis.refresh_from_db()
+    if not analysis.price and not analysis.area:
+        analysis.delete()
+        profile.delete()
+        return Response(
+            {'detail': 'Не удалось загрузить данные квартиры. Проверьте ссылку — она должна вести на страницу конкретного объявления на Циан, Авито или Яндекс.Недвижимость.'},
+            status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        )
+
     analyze_apartment(analysis)
 
-    return Response(
-        ApartmentAnalysisDetailSerializer(analysis).data,
-        status=status.HTTP_201_CREATED,
-    )
+    result = ApartmentAnalysisDetailSerializer(analysis).data
 
-
-@api_view(['GET'])
-def get_analysis(request, analysis_id):
+    # Don't keep history — delete after serializing
     try:
-        analysis = ApartmentAnalysis.objects.select_related('family_profile').get(id=analysis_id)
-    except ApartmentAnalysis.DoesNotExist:
-        return Response({'error': 'Анализ не найден'}, status=status.HTTP_404_NOT_FOUND)
-    return Response(ApartmentAnalysisDetailSerializer(analysis).data)
+        analysis.delete()
+        profile.delete()
+    except Exception:
+        pass
 
-
-@api_view(['GET'])
-def list_analyses(request):
-    analyses = ApartmentAnalysis.objects.order_by('-created_at')[:50]
-    return Response(ApartmentAnalysisListSerializer(analyses, many=True).data)
+    return Response(result, status=status.HTTP_200_OK)
 
 
 def _find_existing_apartment(url: str):

@@ -1597,7 +1597,23 @@ app.post('/parse/:source', async (req, res) => {
     }
 });
 
-// Парсинг одной квартиры по прямой ссылке
+// ────────────────────────────────────────────────────────
+// Парсинг одной квартиры через HTTP (без Playwright → нет капчи)
+// ────────────────────────────────────────────────────────
+const cheerio = require('cheerio');
+
+const HTTP_HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+    'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'Sec-Fetch-Dest': 'document',
+    'Sec-Fetch-Mode': 'navigate',
+    'Sec-Fetch-Site': 'none',
+    'Sec-Fetch-User': '?1',
+    'Cache-Control': 'max-age=0',
+};
+
 app.post('/parse-single', async (req, res) => {
     const { url } = req.body;
     if (!url) return res.status(400).json({ error: 'url is required' });
@@ -1607,172 +1623,603 @@ app.post('/parse-single', async (req, res) => {
     else if (url.includes('avito.ru')) source = 'avito';
     else if (url.includes('realty.yandex') || url.includes('realty.ya.ru')) source = 'yandex';
 
-    const { context } = await initBrowser();
-    const page = await context.newPage();
-
     try {
-        console.log(`[parse-single] Opening: ${url}`);
-        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-        await page.waitForTimeout(3000);
+        console.log(`[parse-single] Fetching: ${url}`);
+        const resp = await axios.get(url, {
+            headers: HTTP_HEADERS,
+            timeout: 20000,
+            maxRedirects: 5,
+        });
+        const html = resp.data;
+        const $ = cheerio.load(html);
+        console.log(`[parse-single] Got HTML, length=${html.length}`);
 
         let data = { source, url };
 
+        // Извлекаем JSON-LD (structured data) — самый надёжный источник
+        const jsonLd = extractJsonLd($);
+
         if (source === 'cian') {
-            data = await parseCianSingle(page, url);
+            data = parseCianHtml($, html, jsonLd, url);
         } else if (source === 'avito') {
-            data = await parseAvitoSingle(page, url);
+            data = parseAvitoHtml($, html, jsonLd, url);
         } else {
-            data = await parseGenericSingle(page, url);
+            data = parseGenericHtml($, html, jsonLd, url);
         }
 
         data.source = source;
         data.url = url;
-        console.log(`[parse-single] Parsed:`, JSON.stringify(data).substring(0, 300));
+
+        // Если HTTP-парсинг вернул мало данных, попробуем Playwright как fallback
+        if (!data.price && !data.area) {
+            console.log(`[parse-single] HTTP gave no data, trying Playwright fallback...`);
+            try {
+                const { context } = await initBrowser();
+                const page = await context.newPage();
+                try {
+                    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 25000 });
+                    await page.waitForTimeout(3000);
+                    let pwData = {};
+                    if (source === 'cian') pwData = await parseCianSinglePW(page, url);
+                    else if (source === 'avito') pwData = await parseAvitoSinglePW(page, url);
+                    else pwData = await parseGenericSinglePW(page, url);
+                    // Merge: PW data fills gaps
+                    for (const [k, v] of Object.entries(pwData)) {
+                        if (v !== null && v !== undefined && v !== '' && !data[k]) data[k] = v;
+                    }
+                } finally {
+                    await page.close();
+                }
+            } catch (pwErr) {
+                console.log(`[parse-single] Playwright fallback failed: ${pwErr.message}`);
+            }
+        }
+
+        console.log(`[parse-single] Result:`, JSON.stringify(data).substring(0, 500));
         res.json(data);
     } catch (error) {
-        console.error(`[parse-single] Error:`, error.message);
-        res.status(500).json({ error: error.message });
-    } finally {
-        await page.close();
+        console.error(`[parse-single] HTTP Error:`, error.message);
+        // Fallback to Playwright
+        try {
+            console.log(`[parse-single] HTTP failed, full Playwright fallback...`);
+            const { context } = await initBrowser();
+            const page = await context.newPage();
+            try {
+                await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 25000 });
+                await page.waitForTimeout(3000);
+                let data = { source, url };
+                if (source === 'cian') data = { ...data, ...await parseCianSinglePW(page, url) };
+                else if (source === 'avito') data = { ...data, ...await parseAvitoSinglePW(page, url) };
+                else data = { ...data, ...await parseGenericSinglePW(page, url) };
+                console.log(`[parse-single] PW Result:`, JSON.stringify(data).substring(0, 500));
+                res.json(data);
+            } finally {
+                await page.close();
+            }
+        } catch (pwErr) {
+            console.error(`[parse-single] All methods failed:`, pwErr.message);
+            res.status(500).json({ error: 'Не удалось загрузить страницу: ' + error.message });
+        }
     }
 });
 
-async function parseCianSingle(page, url) {
+function extractJsonLd($) {
+    const scripts = $('script[type="application/ld+json"]');
+    const results = [];
+    scripts.each((_, el) => {
+        try {
+            const parsed = JSON.parse($(el).html());
+            if (Array.isArray(parsed)) results.push(...parsed);
+            else results.push(parsed);
+        } catch {}
+    });
+    return results;
+}
+
+// Маппинг аббревиатур округов → полные названия для DISTRICT_DATA в Django
+const DISTRICT_MAP = {
+    'ЦАО': 'Центральный', 'САО': 'Северный', 'СВАО': 'Северо-Восточный',
+    'ВАО': 'Восточный', 'ЮВАО': 'Юго-Восточный', 'ЮАО': 'Южный',
+    'ЮЗАО': 'Юго-Западный', 'ЗАО': 'Западный', 'СЗАО': 'Северо-Западный',
+    'НАО': 'Новомосковский', 'ТАО': 'Троицкий',
+    'Новомосковский': 'Новомосковский', 'Троицкий': 'Троицкий',
+    'Центральный': 'Центральный', 'Северный': 'Северный',
+    'Северо-Восточный': 'Северо-Восточный', 'Восточный': 'Восточный',
+    'Юго-Восточный': 'Юго-Восточный', 'Южный': 'Южный',
+    'Юго-Западный': 'Юго-Западный', 'Западный': 'Западный',
+    'Северо-Западный': 'Северо-Западный',
+};
+
+function detectDistrict(text) {
+    if (!text) return null;
+    for (const [key, val] of Object.entries(DISTRICT_MAP)) {
+        if (text.includes(key)) return val;
+    }
+    return null;
+}
+
+function extractFromTitle(text) {
+    const res = {};
+    if (!text) return res;
+    const rm = text.match(/(\d+)-комн/);
+    res.rooms = rm ? parseInt(rm[1]) : (text.toLowerCase().includes('студ') ? 0 : null);
+    const am = text.match(/([\d,.]+)\s*м[²2.\s,]/);
+    res.area = am ? parseFloat(am[1].replace(',', '.')) : null;
+    const fm = text.match(/этаж\s*(\d+)\s*[\/из]+\s*(\d+)/i) || text.match(/(\d+)\s*\/\s*(\d+)\s*эт/i);
+    if (fm) { res.floor = parseInt(fm[1]); res.total_floors = parseInt(fm[2]); }
+    return res;
+}
+
+function detectBuildingType(text) {
+    if (!text) return null;
+    const t = text.toLowerCase();
+    if (t.includes('монолитно-кирпич') || (t.includes('монолит') && t.includes('кирпич'))) return 'монолитно-кирпичный';
+    if (t.includes('монолит')) return 'монолитный';
+    if (t.includes('кирпич')) return 'кирпичный';
+    if (t.includes('панель')) return 'панельный';
+    if (t.includes('блочн') || t.includes('блок')) return 'блочный';
+    return null;
+}
+
+function extractInfrastructure(description, address) {
+    const text = (description || '') + ' ' + (address || '');
+    const infra = { schools: [], kindergartens: [], parks: [], malls: [], clinics: [], fitness: [] };
+
+    function addUnique(arr, val, maxLen = 40) {
+        const clean = val.trim().replace(/\s+/g, ' ').substring(0, maxLen);
+        if (clean.length > 3 && !arr.some(x => x.toLowerCase() === clean.toLowerCase())) arr.push(clean);
+    }
+
+    // Schools: "школа №2120", "школа 2120 корпус ш3", "гимназия №1", "лицей Вторая школа"
+    const schoolRe = /(?:общеобразовательн[а-я]*\s+)?(?:школ[аыуе]?|гимнази[яию]|лице[йя])\s*(?:№\s*)?(\d{3,4})(?:\s*[«"]([^»"]+)[»"])?/gi;
+    let m;
+    while ((m = schoolRe.exec(text)) !== null) {
+        const num = m[1];
+        const named = m[2] ? ` «${m[2].trim()}»` : '';
+        const type = m[0].toLowerCase().includes('гимназ') ? 'Гимназия' : m[0].toLowerCase().includes('лицей') ? 'Лицей' : 'Школа';
+        addUnique(infra.schools, `${type} №${num}${named}`);
+    }
+    const namedSchoolRe = /(?:школ[а-я]*|гимнази[а-я]*|лице[а-я]*)\s+[«"]([^»"]{2,40})[»"]/gi;
+    while ((m = namedSchoolRe.exec(text)) !== null) {
+        addUnique(infra.schools, m[1].trim());
+    }
+
+    // Kindergartens: "детский сад 2120 корпус д4", "д/с «Сказка»"
+    const kinderRe = /(?:детски[йе]\s+сад[а-я]*|д\/с)\s*(?:№\s*)?(\d{3,4})?(?:\s*[«"]([^»"]+)[»"])?/gi;
+    while ((m = kinderRe.exec(text)) !== null) {
+        if (m[1]) addUnique(infra.kindergartens, `Д/с №${m[1]}`);
+        else if (m[2]) addUnique(infra.kindergartens, `Д/с «${m[2].trim()}»`);
+    }
+
+    // Parks: "парк Филатов Луг", "Ульяновский лесопарк"
+    const parkRe = /(?:парк[а-я]*|лесопарк[а-я]*|сквер[а-я]*)\s+[«"]?([А-ЯЁ][а-яёА-ЯЁ\s\-]{2,35})/g;
+    while ((m = parkRe.exec(text)) !== null) {
+        const nameRaw = m[1].trim().replace(/\s+/g, ' ');
+        const prefix = m[0].toLowerCase().includes('лесопарк') ? 'Лесопарк' : m[0].toLowerCase().includes('сквер') ? 'Сквер' : 'Парк';
+        if (nameRaw.length > 2 && !/(?:входн|располож|проект|прям|всего|выезд|группы)/i.test(nameRaw)) {
+            addUnique(infra.parks, `${prefix} «${nameRaw}»`);
+        }
+    }
+
+    // Malls: "ТЦ Столица", "торговый центр Саларис"
+    const mallRe = /(?:торгов[а-я]*\s*центр[а-я]*|ТЦ|ТРЦ)\s*[«"]?([А-ЯЁа-яё][а-яёА-ЯЁ\s\-]{1,30})[»"]?/gi;
+    while ((m = mallRe.exec(text)) !== null) {
+        const full = m[0].trim().replace(/\s+/g, ' ');
+        const name = m[1] ? m[1].trim() : full;
+        if (name.length > 2 && !/кафе|продукт|магазин/i.test(name)) addUnique(infra.malls, `ТЦ «${name}»`);
+    }
+
+    // Clinics: "поликлиника", "ГКБ №40"
+    const clinicRe = /(?:поликлиник[а-я]*|ГКБ)\s*(?:№?\s*)?(\d{1,4})?(?:\s*[«"]([^»"]+)[»"])?/gi;
+    while ((m = clinicRe.exec(text)) !== null) {
+        if (m[1]) addUnique(infra.clinics, `${m[0].toLowerCase().includes('гкб') ? 'ГКБ' : 'Поликлиника'} №${m[1]}`);
+        else if (m[2]) addUnique(infra.clinics, m[2].trim());
+        else addUnique(infra.clinics, m[0].trim().replace(/\s+/g, ' ').substring(0, 30));
+    }
+
+    // Fitness
+    const fitnessRe = /фитнес[а-я]*\s*(?:центр[а-я]*|клуб[а-я]*)?\s*[«"]?([А-ЯЁa-zA-Z][а-яёА-ЯЁa-zA-Z\s\-.]{2,30})?[»"]?/gi;
+    while ((m = fitnessRe.exec(text)) !== null) {
+        const name = (m[1] || 'Фитнес-клуб').trim();
+        if (name.length > 2) addUnique(infra.fitness, name);
+    }
+
+    // RC features from description
+    const tl = text.toLowerCase();
+    const features = [];
+    if (/закрыт[а-я]*\s+территор/i.test(tl)) features.push('closed_territory');
+    if (/детск[а-я]*\s+площадк/i.test(tl) || /игров[а-я]*\s+площадк/i.test(tl)) features.push('playground');
+    if (/спортивн[а-я]*\s+площадк/i.test(tl)) features.push('sports_ground');
+    if (/парковк|паркинг|машиномест/i.test(tl)) features.push('parking');
+    if (/подземн[а-я]*\s+парк/i.test(tl)) features.push('underground_parking');
+    if (/консьерж/i.test(tl)) features.push('concierge');
+    if (/площадк[а-я]*\s+для\s+(?:выгула\s+)?собак|собач/i.test(tl)) features.push('dog_walking');
+    if (/лифт/i.test(tl)) features.push('elevator');
+    if (/грузов[а-я]*\s+лифт/i.test(tl)) features.push('freight_elevator');
+    if (/видеонаблюдени/i.test(tl)) features.push('cctv');
+
+    infra.rc_features = features;
+    return infra;
+}
+
+function parseCianHtml($, html, jsonLd, url) {
     const data = {};
 
-    // Название
-    data.title = await page.$eval('h1', el => el.textContent.trim()).catch(() => '');
+    // 1. OG-теги — самый надёжный источник на Циан
+    const og = {};
+    $('meta[property^="og:"]').each((_, el) => {
+        og[$(el).attr('property')] = $(el).attr('content') || '';
+    });
 
-    // Цена
+    const ogTitle = og['og:title'] || '';
+    const ogDesc = og['og:description'] || '';
+    console.log(`[cian] og:title = ${ogTitle}`);
+    console.log(`[cian] og:description = ${ogDesc}`);
+
+    // Из og:title: "Продаётся 1-комнатная квартира в ЖК Название за 12 688 828 руб., 42.2 м.кв., этаж 3/22"
+    const ogInfo = extractFromTitle(ogTitle);
+    if (ogInfo.rooms !== null && ogInfo.rooms !== undefined) data.rooms = ogInfo.rooms;
+    if (ogInfo.area) data.area = ogInfo.area;
+    if (ogInfo.floor) { data.floor = ogInfo.floor; data.total_floors = ogInfo.total_floors; }
+
+    const ogPriceMatch = ogTitle.match(/за\s+([\d\s]+)\s*руб/i);
+    if (ogPriceMatch) data.price = parseFloat(ogPriceMatch[1].replace(/\s/g, ''));
+
+    // ЖК из og:title: "в Название ЖК за"
+    const rcMatch = ogTitle.match(/(?:квартира\s+в|студия\s+в|апартаменты\s+в)\s+(.+?)\s+за\s/i);
+    if (rcMatch) data.residential_complex = rcMatch[1].trim();
+
+    // Адрес из og:description
+    if (ogDesc) data.address = ogDesc;
+
+    // Округ из адреса
+    data.district = detectDistrict(ogDesc) || detectDistrict(ogTitle);
+
+    // 2. JSON-LD — дополнительные данные
+    const product = jsonLd.find(j => j['@type'] === 'Product');
+    if (product) {
+        if (!data.price && product.offers) {
+            const offer = Array.isArray(product.offers) ? product.offers[0] : product.offers;
+            data.price = parseFloat(String(offer.price || '').replace(/[^\d]/g, '')) || data.price;
+        }
+        // description содержит подробности квартиры
+        const desc = product.description || '';
+        if (desc) {
+            data.description = desc;
+            // Тип дома из описания
+            if (!data.building_type) data.building_type = detectBuildingType(desc);
+            // Год из описания
+            const yearMatch = desc.match(/(?:постройки|построен[а]?|ввод[а]?\s+в\s+эксплуатацию|сда[чн])\s*[:\-—–]?\s*(?:\d+\s*квартал\s*)?((?:19|20)\d{2})/i);
+            if (yearMatch) data.building_year = parseInt(yearMatch[1]);
+            // Площади из описания
+            const laMatch = desc.match(/жилая\s*(?:площадь)?\s*[:\-—–]?\s*([\d,.]+)/i);
+            if (laMatch) data.living_area = parseFloat(laMatch[1].replace(',', '.'));
+            const kaMatch = desc.match(/кухн[яи]\s*[:\-—–]?\s*([\d,.]+)/i);
+            if (kaMatch) data.kitchen_area = parseFloat(kaMatch[1].replace(',', '.'));
+            // Потолки
+            const chMatch = desc.match(/потолк[иов]\s*[:\-—–]?\s*([\d,.]+)/i);
+            if (chMatch) data.ceiling_height = parseFloat(chMatch[1].replace(',', '.'));
+            // Балкон/лоджия
+            if (/балкон/i.test(desc)) data.has_balcony = true;
+            if (/лоджи[яю]/i.test(desc)) data.has_loggia = true;
+            // Санузел
+            if (/совмещ[её]нн/i.test(desc)) data.bathroom_type = 'совмещённый';
+            if (/раздельн/i.test(desc)) data.bathroom_type = 'раздельный';
+        }
+    }
+
+    // 3. H1 — доп. данные
+    const h1 = $('h1').first().text().trim();
+    if (!data.rooms && data.rooms !== 0) {
+        const h1Info = extractFromTitle(h1);
+        if (h1Info.rooms !== null && h1Info.rooms !== undefined) data.rooms = h1Info.rooms;
+        if (h1Info.area && !data.area) data.area = h1Info.area;
+        if (h1Info.floor && !data.floor) { data.floor = h1Info.floor; data.total_floors = h1Info.total_floors; }
+    }
+    data.title = h1 || ogTitle.replace(/\s+за\s+[\d\s]+руб.*/, '') || 'Квартира';
+
+    // 4. Цена из data-testid
+    if (!data.price) {
+        const priceText = $('[data-testid="price-amount"]').text().replace(/[^\d]/g, '');
+        if (priceText) data.price = parseFloat(priceText);
+    }
+
+    // 5. Метро из data-name="UndergroundItem"
+    const metros = [];
+    $('[data-name="UndergroundItem"]').each((i, el) => {
+        const text = $(el).text().trim().replace(/\s+/g, ' ');
+        if (i < 3) metros.push(text);
+    });
+    if (metros.length > 0) {
+        // Первое метро — основное. Формат: "Рассказовка 6 мин."
+        const metroMain = metros[0];
+        const stationMatch = metroMain.match(/^([А-ЯЁа-яё\s\-\.]+?)(\d+)/);
+        if (stationMatch) {
+            data.metro_station = stationMatch[1].trim();
+            data.metro_distance_min = parseInt(stationMatch[2]);
+        } else {
+            data.metro_station = metroMain.replace(/\d+\s*мин.*/, '').trim();
+        }
+        data.nearby_metros = metros;
+    }
+
+    // 6. Шоссе из data-name="HighwayItem"
+    const highways = [];
+    $('[data-name="HighwayItem"]').each((_, el) => {
+        highways.push($(el).text().trim().replace(/\s+/g, ' '));
+    });
+    if (highways.length > 0) data.nearby_highways = highways;
+
+    // 7. Адрес из data-name="Geo" — отдельные части
+    if (!data.address || data.address === ogDesc) {
+        const geoParts = [];
+        $('[data-name="AddressItem"]').each((_, el) => {
+            const t = $(el).text().trim();
+            if (t && t !== 'На карте' && !t.includes('км от МКАД')) geoParts.push(t);
+        });
+        if (geoParts.length > 0) data.address = geoParts.join(', ');
+    }
+    // Дополнительно: расстояние от МКАД
+    $('[data-name="Geo"] span').each((_, el) => {
+        const t = $(el).text().trim();
+        const mkadMatch = t.match(/(\d+)\s*км от МКАД/);
+        if (mkadMatch) data.mkad_distance_km = parseInt(mkadMatch[1]);
+    });
+
+    // 8. Объект характеристики из data-name="ObjectFactoidsItem"
+    $('[data-name="ObjectFactoidsItem"]').each((_, el) => {
+        const t = $(el).text().trim().replace(/\s+/g, ' ');
+        if (!data.building_type) data.building_type = detectBuildingType(t);
+        const ym = t.match(/(19|20)\d{2}/);
+        if (ym && !data.building_year) data.building_year = parseInt(ym[0]);
+    });
+
+    // 9. ЖК из data-name="ParentNew"
+    if (!data.residential_complex) {
+        $('[data-name="ParentNew"] a').each((i, el) => {
+            if (i === 0) {
+                const t = $(el).text().trim();
+                if (t && t.length > 2) data.residential_complex = t;
+            }
+        });
+    }
+
+    // 10. Описание
+    if (!data.description) {
+        data.description = $('[data-name="Description"]').text().trim().substring(0, 1000);
+    }
+
+    // 11. Фото
+    if (product && product.image) {
+        data.photos = Array.isArray(product.image) ? product.image.slice(0, 10) : [product.image];
+    }
+
+    // 12. Infrastructure from description
+    const infra = extractInfrastructure(data.description, data.address);
+    if (infra.schools.length) data.parsed_schools = infra.schools.slice(0, 5);
+    if (infra.kindergartens.length) data.parsed_kindergartens = infra.kindergartens.slice(0, 5);
+    if (infra.parks.length) data.parsed_parks = infra.parks.slice(0, 5);
+    if (infra.malls.length) data.parsed_malls = infra.malls.slice(0, 5);
+    if (infra.clinics.length) data.parsed_clinics = infra.clinics.slice(0, 5);
+    if (infra.fitness.length) data.parsed_fitness = infra.fitness.slice(0, 5);
+    if (infra.rc_features.length) data.rc_features = infra.rc_features;
+
+    console.log(`[cian] Parsed: price=${data.price}, area=${data.area}, rooms=${data.rooms}, floor=${data.floor}/${data.total_floors}, metro=${data.metro_station}, district=${data.district}, RC=${data.residential_complex}, type=${data.building_type}`);
+    console.log(`[cian] Infra: schools=${(data.parsed_schools||[]).length}, kinders=${(data.parsed_kindergartens||[]).length}, parks=${(data.parsed_parks||[]).length}, malls=${(data.parsed_malls||[]).length}`);
+    return data;
+}
+
+function parseAvitoHtml($, html, jsonLd, url) {
+    const data = {};
+
+    // 1. JSON-LD
+    const product = jsonLd.find(j => j['@type'] === 'Product');
+    if (product) {
+        data.title = product.name || '';
+        if (product.offers) {
+            const offer = Array.isArray(product.offers) ? product.offers[0] : product.offers;
+            data.price = parseFloat(String(offer.price || '').replace(/[^\d]/g, '')) || null;
+        }
+        if (product.description) data.description = product.description;
+    }
+
+    // 2. Meta
+    if (!data.price) {
+        const priceMeta = $('meta[itemprop="price"]').attr('content');
+        if (priceMeta) data.price = parseFloat(priceMeta);
+    }
+    if (!data.title) data.title = $('h1').first().text().trim();
+    if (!data.price) {
+        const priceText = $('[data-marker="item-view/item-price"]').text().replace(/[^\d]/g, '');
+        if (priceText) data.price = parseFloat(priceText);
+    }
+
+    // 3. OG-теги
+    const ogTitle = $('meta[property="og:title"]').attr('content') || '';
+    const ogDesc = $('meta[property="og:description"]').attr('content') || '';
+    if (!data.description && ogDesc) data.description = ogDesc;
+
+    // 4. Из заголовка
+    const t = data.title || ogTitle || '';
+    const titleInfo = extractFromTitle(t);
+    if (titleInfo.rooms !== null && titleInfo.rooms !== undefined) data.rooms = titleInfo.rooms;
+    if (titleInfo.area) data.area = titleInfo.area;
+    if (titleInfo.floor) { data.floor = titleInfo.floor; data.total_floors = titleInfo.total_floors; }
+
+    // 5. Адрес
+    data.address = $('[itemprop="address"]').first().text().trim()
+        || $('[data-marker="item-address"]').first().text().trim()
+        || ogDesc;
+
+    // 6. Округ
+    data.district = detectDistrict(data.address);
+
+    // 7. Характеристики — несколько селекторов
+    const allParams = [];
+    $('[class*="params-paramsList"] li').each((_, el) => allParams.push($(el).text().trim()));
+    $('[data-marker="item-params"] li').each((_, el) => allParams.push($(el).text().trim()));
+    // Avito также использует class*="style-item-params"
+    $('[class*="item-params"] li, [class*="iva-item-params"] li').each((_, el) => allParams.push($(el).text().trim()));
+
+    for (const txt of allParams) {
+        if (txt.includes('Площадь кухни') || txt.includes('Кухня')) {
+            const m = txt.match(/([\d,.]+)/); if (m) data.kitchen_area = parseFloat(m[1].replace(',','.'));
+        }
+        if (txt.includes('Жилая площадь') || txt.includes('Жилая')) {
+            const m = txt.match(/([\d,.]+)/); if (m) data.living_area = parseFloat(m[1].replace(',','.'));
+        }
+        if (txt.includes('Высота потолков') || txt.includes('Потолки')) {
+            const m = txt.match(/([\d,.]+)/); if (m) data.ceiling_height = parseFloat(m[1].replace(',','.'));
+        }
+        if (txt.includes('Тип дома') || txt.includes('Материал стен')) {
+            if (!data.building_type) data.building_type = detectBuildingType(txt);
+        }
+        if (txt.includes('Год постройки') || txt.includes('Год сдачи')) {
+            const m = txt.match(/(19|20)\d{2}/); if (m) data.building_year = parseInt(m[0]);
+        }
+        if (/балкон|лоджи/i.test(txt)) data.has_balcony = true;
+        if (/раздельн.*санузел|санузел.*раздельн/i.test(txt)) data.bathroom_type = 'раздельный';
+        if (/совмещ.*санузел|санузел.*совмещ/i.test(txt)) data.bathroom_type = 'совмещённый';
+    }
+
+    // 8. Из описания — доп. данные
+    const desc = (data.description || '').toLowerCase();
+    if (!data.building_type) data.building_type = detectBuildingType(desc);
+    if (/балкон/i.test(desc)) data.has_balcony = true;
+    if (/лоджи/i.test(desc)) data.has_loggia = true;
+
+    // 9. Метро
+    const metroEl = $('[data-marker="item-address"] [class*="metro"], [class*="geo-metro"]').first().text().trim();
+    if (metroEl) {
+        const stMatch = metroEl.match(/^([А-ЯЁа-яё\s\-\.]+?)(\d+)/);
+        if (stMatch) {
+            data.metro_station = stMatch[1].trim();
+            data.metro_distance_min = parseInt(stMatch[2]);
+        } else {
+            data.metro_station = metroEl;
+        }
+    }
+
+    // 10. Фото
+    const photos = [];
+    $('meta[property="og:image"]').each((_, el) => {
+        const src = $(el).attr('content');
+        if (src && src.includes('http')) photos.push(src);
+    });
+    if (photos.length > 0) data.photos = photos.slice(0, 10);
+
+    // Infrastructure from description
+    const infra = extractInfrastructure(data.description, data.address);
+    if (infra.schools.length) data.parsed_schools = infra.schools.slice(0, 5);
+    if (infra.kindergartens.length) data.parsed_kindergartens = infra.kindergartens.slice(0, 5);
+    if (infra.parks.length) data.parsed_parks = infra.parks.slice(0, 5);
+    if (infra.malls.length) data.parsed_malls = infra.malls.slice(0, 5);
+    if (infra.clinics.length) data.parsed_clinics = infra.clinics.slice(0, 5);
+    if (infra.fitness.length) data.parsed_fitness = infra.fitness.slice(0, 5);
+    if (infra.rc_features.length) data.rc_features = infra.rc_features;
+
+    console.log(`[avito] Parsed: price=${data.price}, area=${data.area}, rooms=${data.rooms}, floor=${data.floor}/${data.total_floors}, metro=${data.metro_station}, district=${data.district}, type=${data.building_type}`);
+    return data;
+}
+
+function parseGenericHtml($, html, jsonLd, url) {
+    const data = {};
+
+    // OG
+    const ogTitle = $('meta[property="og:title"]').attr('content') || '';
+    const ogDesc = $('meta[property="og:description"]').attr('content') || '';
+
+    data.title = $('h1').first().text().trim() || ogTitle || 'Квартира';
+    data.address = ogDesc || '';
+    data.district = detectDistrict(ogDesc) || detectDistrict(ogTitle);
+
+    // JSON-LD
+    for (const item of jsonLd) {
+        if (item.offers) {
+            const offer = Array.isArray(item.offers) ? item.offers[0] : item.offers;
+            data.price = parseFloat(String(offer.price || '').replace(/[^\d]/g, '')) || null;
+        }
+        if (item.description) data.description = item.description;
+    }
+
+    // Meta price
+    if (!data.price) {
+        const pm = $('meta[itemprop="price"]').attr('content') || $('[itemprop="price"]').attr('content');
+        if (pm) data.price = parseFloat(pm.replace(/[^\d]/g, ''));
+    }
+
+    // Из заголовка
+    const titleInfo = extractFromTitle(data.title);
+    if (titleInfo.rooms !== null && titleInfo.rooms !== undefined) data.rooms = titleInfo.rooms;
+    if (titleInfo.area) data.area = titleInfo.area;
+    if (titleInfo.floor) { data.floor = titleInfo.floor; data.total_floors = titleInfo.total_floors; }
+
+    // Из og:title тоже
+    if (!data.area || !data.floor) {
+        const ogInfo = extractFromTitle(ogTitle);
+        if (!data.area && ogInfo.area) data.area = ogInfo.area;
+        if (!data.floor && ogInfo.floor) { data.floor = ogInfo.floor; data.total_floors = ogInfo.total_floors; }
+        if (data.rooms === null && data.rooms === undefined && ogInfo.rooms !== null) data.rooms = ogInfo.rooms;
+    }
+
+    // Тип дома из описания
+    if (data.description) {
+        data.building_type = detectBuildingType(data.description);
+        const ym = data.description.match(/(19|20)\d{2}/);
+        if (ym) data.building_year = parseInt(ym[0]);
+    }
+
+    // Infrastructure from description
+    const infra = extractInfrastructure(data.description, data.address);
+    if (infra.schools.length) data.parsed_schools = infra.schools.slice(0, 5);
+    if (infra.kindergartens.length) data.parsed_kindergartens = infra.kindergartens.slice(0, 5);
+    if (infra.parks.length) data.parsed_parks = infra.parks.slice(0, 5);
+    if (infra.malls.length) data.parsed_malls = infra.malls.slice(0, 5);
+    if (infra.clinics.length) data.parsed_clinics = infra.clinics.slice(0, 5);
+    if (infra.fitness.length) data.parsed_fitness = infra.fitness.slice(0, 5);
+    if (infra.rc_features.length) data.rc_features = infra.rc_features;
+
+    console.log(`[generic] Parsed: price=${data.price}, area=${data.area}, rooms=${data.rooms}, floor=${data.floor}/${data.total_floors}, district=${data.district}`);
+    return data;
+}
+
+// Playwright fallback functions (keep existing logic)
+async function parseCianSinglePW(page, url) {
+    const data = {};
+    data.title = await page.$eval('h1', el => el.textContent.trim()).catch(() => '');
     const priceText = await page.$eval('[data-testid="price-amount"]', el => el.textContent).catch(() =>
-        page.$eval('.a10a3f92e9--price_value--lqIK0', el => el.textContent).catch(() => '')
+        page.$eval('[class*="price_value"]', el => el.textContent).catch(() => '')
     );
     data.price = parseFloat((priceText || '').replace(/[^\d]/g, '')) || null;
-
-    // Параметры из заголовка (2-комн. кв., 54 м², 8/17 эт.)
-    const subtitle = data.title || '';
-    const roomsMatch = subtitle.match(/(\d+)-комн/);
-    data.rooms = roomsMatch ? parseInt(roomsMatch[1]) : (subtitle.includes('Студия') ? 0 : null);
-
-    const areaMatch = subtitle.match(/([\d,.]+)\s*м²/);
-    data.area = areaMatch ? parseFloat(areaMatch[1].replace(',', '.')) : null;
-
-    const floorMatch = subtitle.match(/(\d+)\/(\d+)\s*эт/);
-    if (floorMatch) {
-        data.floor = parseInt(floorMatch[1]);
-        data.total_floors = parseInt(floorMatch[2]);
-    }
-
-    // Метро
-    data.metro_station = await page.$eval('a[data-name="SpecialGeo"] span, [class*="metro"] a', el => el.textContent.trim()).catch(() => '');
-    const metroWalkText = await page.$eval('[class*="underground"]', el => el.textContent).catch(() => '');
-    const walkMatch = metroWalkText.match(/(\d+)\s*мин/);
-    data.metro_distance_min = walkMatch ? parseInt(walkMatch[1]) : null;
-
-    // Адрес
-    data.address = await page.$eval('[data-name="Geo"] span.a10a3f92e9--address--SMU25, [class*="address"]', el => el.textContent.trim()).catch(() => '');
-
-    // Дополнительные параметры из блока характеристик
-    const infoItems = await page.$$eval('[data-testid="object-summary-description-info"] li, [class*="info-section"] li, [data-name="ObjectSummaryDescription"] li', items =>
-        items.map(el => el.textContent.trim())
-    ).catch(() => []);
-
-    for (const item of infoItems) {
-        if (item.includes('Общая')) {
-            const m = item.match(/([\d,.]+)/);
-            if (m && !data.area) data.area = parseFloat(m[1].replace(',', '.'));
-        }
-        if (item.includes('Жилая')) {
-            const m = item.match(/([\d,.]+)/);
-            if (m) data.living_area = parseFloat(m[1].replace(',', '.'));
-        }
-        if (item.includes('Кухня')) {
-            const m = item.match(/([\d,.]+)/);
-            if (m) data.kitchen_area = parseFloat(m[1].replace(',', '.'));
-        }
-        if (item.includes('Потолки') || item.includes('потолк')) {
-            const m = item.match(/([\d,.]+)/);
-            if (m) data.ceiling_height = parseFloat(m[1].replace(',', '.'));
-        }
-        if (item.includes('Санузел')) data.bathroom_type = item.replace('Санузел', '').trim();
-        if (item.includes('Балкон') || item.includes('балкон')) data.has_balcony = true;
-        if (item.includes('Лоджия') || item.includes('лоджия')) data.has_loggia = true;
-    }
-
-    // Тип дома, год
-    const buildingItems = await page.$$eval('[data-name="BtiHouseData"] li, [class*="building-info"] li, [data-name="ObjectFactoidsItem"]', items =>
-        items.map(el => el.textContent.trim())
-    ).catch(() => []);
-
-    for (const item of buildingItems) {
-        if (item.includes('Построен') || item.includes('построен') || item.includes('Год')) {
-            const m = item.match(/(19|20)\d{2}/);
-            if (m) data.building_year = parseInt(m[0]);
-        }
-        if (item.includes('панель')) data.building_type = 'панельный';
-        if (item.includes('монолит') && item.includes('кирпич')) data.building_type = 'монолитно-кирпичный';
-        else if (item.includes('монолит')) data.building_type = 'монолитный';
-        else if (item.includes('кирпич')) data.building_type = 'кирпичный';
-        else if (item.includes('блок')) data.building_type = 'блочный';
-    }
-
-    // Округ — из адреса
-    const districts = ['Центральный','Северный','Северо-Восточный','Восточный','Юго-Восточный','Южный','Юго-Западный','Западный','Северо-Западный','Новомосковский','Троицкий'];
-    for (const d of districts) {
-        if ((data.address || '').includes(d)) { data.district = d; break; }
-    }
-
-    // ЖК
-    data.residential_complex = await page.$eval('[data-name="Parent"] a, [class*="jk-name"] a', el => el.textContent.trim()).catch(() => '');
-
+    const t = data.title || '';
+    const rm = t.match(/(\d+)-комн/);
+    data.rooms = rm ? parseInt(rm[1]) : (t.includes('Студия') ? 0 : null);
+    const am = t.match(/([\d,.]+)\s*м²/);
+    data.area = am ? parseFloat(am[1].replace(',', '.')) : null;
+    const fm = t.match(/(\d+)\/(\d+)\s*эт/);
+    if (fm) { data.floor = parseInt(fm[1]); data.total_floors = parseInt(fm[2]); }
+    data.metro_station = await page.$eval('a[data-name="SpecialGeo"] span', el => el.textContent.trim()).catch(() => '');
+    data.address = await page.$eval('[class*="address"]', el => el.textContent.trim()).catch(() => '');
     return data;
 }
 
-async function parseAvitoSingle(page, url) {
+async function parseAvitoSinglePW(page, url) {
     const data = {};
-
     data.title = await page.$eval('h1', el => el.textContent.trim()).catch(() => '');
-
-    const priceText = await page.$eval('[itemprop="price"]', el => el.getAttribute('content')).catch(() =>
-        page.$eval('[data-marker="item-view/item-price"]', el => el.textContent.replace(/[^\d]/g, '')).catch(() => '')
-    );
+    const priceText = await page.$eval('[itemprop="price"]', el => el.getAttribute('content')).catch(() => '');
     data.price = parseFloat(priceText) || null;
-
-    const subtitle = data.title || '';
-    const roomsMatch = subtitle.match(/(\d+)-комн/);
-    data.rooms = roomsMatch ? parseInt(roomsMatch[1]) : (subtitle.includes('Студия') ? 0 : null);
-    const areaMatch = subtitle.match(/([\d,.]+)\s*м²/);
-    data.area = areaMatch ? parseFloat(areaMatch[1].replace(',', '.')) : null;
-    const floorMatch = subtitle.match(/(\d+)\/(\d+)\s*эт/);
-    if (floorMatch) {
-        data.floor = parseInt(floorMatch[1]);
-        data.total_floors = parseInt(floorMatch[2]);
-    }
-
-    data.address = await page.$eval('[itemprop="address"] span, [data-marker="item-address"] span', el => el.textContent.trim()).catch(() => '');
-
-    const params = await page.$$eval('[class*="params-paramsList"] li', items =>
-        items.map(el => el.textContent.trim())
-    ).catch(() => []);
-    for (const p of params) {
-        if (p.includes('Площадь кухни')) { const m = p.match(/([\d,.]+)/); if (m) data.kitchen_area = parseFloat(m[1].replace(',','.')); }
-        if (p.includes('Жилая площадь')) { const m = p.match(/([\d,.]+)/); if (m) data.living_area = parseFloat(m[1].replace(',','.')); }
-        if (p.includes('Высота потолков')) { const m = p.match(/([\d,.]+)/); if (m) data.ceiling_height = parseFloat(m[1].replace(',','.')); }
-        if (p.includes('Санузел')) data.bathroom_type = p.replace(/.*Санузел\s*/, '').trim();
-        if (p.includes('Балкон') || p.includes('Лоджия')) { data.has_balcony = p.includes('балкон'); data.has_loggia = p.includes('лоджия'); }
-        if (p.includes('Тип дома')) {
-            if (p.includes('панель')) data.building_type = 'панельный';
-            else if (p.includes('монолит') && p.includes('кирпич')) data.building_type = 'монолитно-кирпичный';
-            else if (p.includes('монолит')) data.building_type = 'монолитный';
-            else if (p.includes('кирпич')) data.building_type = 'кирпичный';
-        }
-        if (p.includes('Год постройки')) { const m = p.match(/(19|20)\d{2}/); if (m) data.building_year = parseInt(m[0]); }
-    }
-
+    const t = data.title || '';
+    const rm = t.match(/(\d+)-комн/);
+    data.rooms = rm ? parseInt(rm[1]) : (t.includes('Студия') ? 0 : null);
+    const am = t.match(/([\d,.]+)\s*м²/);
+    data.area = am ? parseFloat(am[1].replace(',', '.')) : null;
+    const fm = t.match(/(\d+)\/(\d+)\s*эт/);
+    if (fm) { data.floor = parseInt(fm[1]); data.total_floors = parseInt(fm[2]); }
+    data.address = await page.$eval('[itemprop="address"]', el => el.textContent.trim()).catch(() => '');
     return data;
 }
 
-async function parseGenericSingle(page, url) {
+async function parseGenericSinglePW(page, url) {
     const data = {};
     data.title = await page.$eval('h1', el => el.textContent.trim()).catch(() => 'Квартира');
     const priceText = await page.$eval('[itemprop="price"]', el => el.getAttribute('content')).catch(() => '');

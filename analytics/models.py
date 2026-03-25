@@ -132,6 +132,11 @@ class ApartmentAnalysis(models.Model):
     schools_total_in_district = models.IntegerField(null=True, blank=True)
     kindergartens_total_in_district = models.IntegerField(null=True, blank=True)
 
+    # === Транспорт (доп.) ===
+    nearby_metros = models.JSONField(default=list, blank=True)
+    nearby_highways = models.JSONField(default=list, blank=True)
+    mkad_distance_km = models.IntegerField(null=True, blank=True)
+
     # === Окружение ===
     near_highway = models.BooleanField(default=False)
     near_railway = models.BooleanField(default=False)

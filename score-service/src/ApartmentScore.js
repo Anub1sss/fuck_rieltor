@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { RadarChart, Radar, PolarGrid, PolarAngleAxis, PolarRadiusAxis, ResponsiveContainer, Tooltip } from 'recharts';
 import './ApartmentScore.css';
 
@@ -9,7 +9,6 @@ const ApartmentScore = () => {
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState(null);
   const [error, setError] = useState('');
-  const [history, setHistory] = useState([]);
   const [form, setForm] = useState({
     source_url: '',
     buyer_type: 'couple',
@@ -20,12 +19,6 @@ const ApartmentScore = () => {
     priority_safety: true, priority_quietness: true, max_commute_minutes: 60,
   });
 
-  useEffect(() => { loadHistory(); }, []);
-
-  const loadHistory = async () => {
-    try { const r = await fetch(`${API}/analyses/`); if (r.ok) setHistory(await r.json()); } catch {}
-  };
-
   const handleSubmit = async (e) => {
     e.preventDefault(); setLoading(true); setError('');
     try {
@@ -34,14 +27,12 @@ const ApartmentScore = () => {
         body: JSON.stringify(form),
       });
       if (!r.ok) { const err = await r.json(); throw new Error(err.detail || err.source_url?.[0] || 'Ошибка'); }
-      setResult(await r.json()); setStep('result'); loadHistory();
+      const data = await r.json();
+      if (!data.price && !data.area) {
+        throw new Error('Не удалось загрузить данные квартиры. Проверьте ссылку — она должна вести на страницу конкретной квартиры на Циан, Авито или Яндекс.Недвижимость.');
+      }
+      setResult(data); setStep('result');
     } catch (err) { setError(err.message); } finally { setLoading(false); }
-  };
-
-  const loadAnalysis = async (id) => {
-    setLoading(true);
-    try { const r = await fetch(`${API}/analyses/${id}/`); if (r.ok) { setResult(await r.json()); setStep('result'); } }
-    catch {} finally { setLoading(false); }
   };
 
   if (step === 'result' && result) return <AnalysisResult result={result} onBack={() => { setStep('form'); setResult(null); }} />;
@@ -141,21 +132,8 @@ const ApartmentScore = () => {
           </div>
         </div>
 
-        {history.length > 0 && (
-          <div className="score-history">
-            <h3>История</h3>
-            <div className="history-list">{history.map(h => (
-              <button key={h.id} className="history-item" onClick={() => loadAnalysis(h.id)}>
-                <ScoreBadge score={h.score_total} size="sm" />
-                <div className="history-item__info">
-                  <span className="history-item__title">{h.title || 'Квартира'}</span>
-                  <span className="history-item__meta">{h.rooms && `${h.rooms}-комн.`}{h.price && ` · ${fmtPrice(h.price)} ₽`}</span>
-                </div>
-                <span className="history-item__source">{h.source_type}</span>
-              </button>
-            ))}</div>
-          </div>
-        )}
+
+
       </div>
     </div>
   );
@@ -216,8 +194,20 @@ const AnalysisResult = ({ result: r, onBack }) => {
               {r.floor && ` · ${r.floor}/${r.total_floors} эт.`}
               {r.ceiling_height && ` · потолки ${r.ceiling_height} м`}
             </p>
+            {r.residential_complex && <p className="result-rc">🏗 ЖК «{r.residential_complex}»</p>}
             {r.address && <p className="result-address">{r.address}</p>}
-            {r.metro_station && <p className="result-metro">● {r.metro_station}{r.metro_distance_min && ` (${r.metro_distance_min} мин пешком)`}</p>}
+            {r.metro_station && <p className="result-metro">🚇 {r.metro_station}{r.metro_distance_min ? ` — ${r.metro_distance_min} мин пешком` : ''}</p>}
+            {r.nearby_metros?.length > 1 && (
+              <div className="result-metros-list">
+                {r.nearby_metros.slice(1).map((m,i) => <span key={i} className="metro-tag">🚇 {m}</span>)}
+              </div>
+            )}
+            {r.nearby_highways?.length > 0 && (
+              <div className="result-highways">
+                {r.nearby_highways.map((h,i) => <span key={i} className="highway-tag">🛣 {h}</span>)}
+              </div>
+            )}
+            {r.mkad_distance_km && <p className="result-mkad">{r.mkad_distance_km} км от МКАД</p>}
           </div>
         </div>
         {r.price && (
