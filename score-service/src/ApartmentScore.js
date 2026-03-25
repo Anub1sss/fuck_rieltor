@@ -4,8 +4,13 @@ import './ApartmentScore.css';
 
 function getApiBase() {
   if (process.env.REACT_APP_API_URL) return process.env.REACT_APP_API_URL;
-  const host = window.location.hostname;
-  return `http://${host}:8000/api`;
+  const loc = window.location;
+  // GitHub Codespaces: *.app.github.dev — заменяем порт в домене
+  if (loc.hostname.includes('app.github.dev')) {
+    const apiHost = loc.hostname.replace('-3002.', '-8000.');
+    return `${loc.protocol}//${apiHost}/api`;
+  }
+  return `${loc.protocol}//${loc.hostname}:8000/api`;
 }
 const API = getApiBase() + '/analytics';
 
