@@ -2,7 +2,12 @@ import React, { useState, useEffect } from 'react';
 import { RadarChart, Radar, PolarGrid, PolarAngleAxis, PolarRadiusAxis, ResponsiveContainer, Tooltip } from 'recharts';
 import './ApartmentScore.css';
 
-const API = (process.env.REACT_APP_API_URL || 'http://localhost:8000/api') + '/analytics';
+function getApiBase() {
+  if (process.env.REACT_APP_API_URL) return process.env.REACT_APP_API_URL;
+  const host = window.location.hostname;
+  return `http://${host}:8000/api`;
+}
+const API = getApiBase() + '/analytics';
 
 const ApartmentScore = () => {
   const [step, setStep] = useState('form');

@@ -40,7 +40,7 @@ services:
     environment:
       - SECRET_KEY=${SECRET_KEY:-django-insecure-dev-key-change-in-prod}
       - DEBUG=${DEBUG:-1}
-      - ALLOWED_HOSTS=${ALLOWED_HOSTS:-localhost,127.0.0.1,0.0.0.0}
+      - ALLOWED_HOSTS=${ALLOWED_HOSTS:-*}
       - DB_HOST=db
       - DB_NAME=rieltor_db
       - DB_USER=postgres
@@ -114,10 +114,7 @@ services:
       - ./frontend/public:/app/public
 
   score-service:
-    build:
-      context: ./score-service
-      args:
-        REACT_APP_API_URL: ${SCORE_API_URL:-http://localhost:8000/api}
+    build: ./score-service
     ports:
       - "3002:3002"
     depends_on:
