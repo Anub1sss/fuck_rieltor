@@ -707,7 +707,7 @@ async function parseAvito() {
         const baseUrl = 'https://www.avito.ru/moskva/kvartiry/sdam/na_dlitelnyy_srok/bez_komissii-ASgBAgICA0SSA8gQ8AeQUp74DgI?context=H4sIAAAAAAAA_wFNALL_YToyOntzOjg6ImZyb21QYWdlIjtzOjEyOiJyZWNlbnRTZWFyY2giO3M6OToiZnJvbV9wYWdlIjtzOjEyOiJyZWNlbnRTZWFyY2giO32YQ9UcTQAAAA';
         
         let allApartments = [];
-        const maxPages = 5; // Увеличиваем до 5 страниц 
+        const maxPages = 8; // Парсим 8 страниц с фото 
         
         
         for (let pageNum = 1; pageNum <= maxPages; pageNum++) {
@@ -721,42 +721,111 @@ async function parseAvito() {
             }
             
             console.log(`🌐 Открываю URL: ${pageUrl}`);
-            await page.goto(pageUrl, { waitUntil: 'networkidle', timeout: 60000 });
-        await page.waitForTimeout(3000);
+            try {
+                await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 120000 });
+            } catch (e) {
+                console.log(`⚠️  Ошибка загрузки с domcontentloaded, пробую load: ${e.message}`);
+                try {
+                    await page.goto(pageUrl, { waitUntil: 'load', timeout: 120000 });
+                } catch (e2) {
+                    console.log(`⚠️  Ошибка загрузки с load, пробую без waitUntil: ${e2.message}`);
+                    await page.goto(pageUrl, { timeout: 120000 });
+                }
+            }
+            await page.waitForTimeout(5000);
+            
+            // Ждем появления контента
+            try {
+                await page.waitForSelector('[data-marker="item"], a[href*="/kvartiry/"]', { timeout: 30000 }).catch(() => {
+                    console.log('⚠️  Селекторы не появились, продолжаем...');
+                });
+            } catch (e) {
+                console.log('⚠️  Таймаут ожидания селекторов, продолжаем...');
+            }
             
             const currentUrl = page.url();
             console.log(`✅ Текущий URL после загрузки: ${currentUrl}`);
         
+            // Проверка на капчу
+            const hasCaptcha = await page.$('.captcha, #captcha, [data-captcha]').catch(() => null);
+            if (hasCaptcha) {
+                console.log('⚠️  Обнаружена капча, жду 10 секунд...');
+                await page.waitForTimeout(10000);
+            }
             
             console.log('Ищу карточки на странице...');
             
+            // Функция для поиска карточек с разными селекторами
+            const findItems = async () => {
+                // Пробуем разные селекторы
+                let items = await page.$$('[data-marker="item"]').catch(() => []);
+                if (items.length === 0) {
+                    items = await page.$$('div[data-marker="catalog-serp"] > div[data-marker="item"]').catch(() => []);
+                }
+                if (items.length === 0) {
+                    items = await page.$$('article[data-marker="item"]').catch(() => []);
+                }
+                if (items.length === 0) {
+                    items = await page.$$('div[itemtype="http://schema.org/Product"]').catch(() => []);
+                }
+                if (items.length === 0) {
+                    // Пробуем найти по ссылкам на объявления
+                    const links = await page.$$('a[href*="/kvartiry/"]').catch(() => []);
+                    if (links.length > 0) {
+                        // Находим родительские элементы
+                        items = await page.evaluate(() => {
+                            const links = Array.from(document.querySelectorAll('a[href*="/kvartiry/"]'));
+                            const parents = new Set();
+                            links.forEach(link => {
+                                let parent = link.closest('[data-marker="item"]') || 
+                                           link.closest('div[itemtype="http://schema.org/Product"]') ||
+                                           link.closest('article') ||
+                                           link.parentElement?.parentElement;
+                                if (parent) parents.add(parent);
+                            });
+                            return Array.from(parents);
+                        }).catch(() => []);
+                    }
+                }
+                return items;
+            };
             
             let previousCount = 0;
             let items = [];
-            const maxScrolls = 5;
+            const maxScrolls = 8;
             
             for (let scroll = 0; scroll < maxScrolls; scroll++) {
                 await page.evaluate(() => {
                     window.scrollBy(0, window.innerHeight * 2);
                 });
-                await page.waitForTimeout(2000);
+                await page.waitForTimeout(3000);
                 
-                
-                items = await page.$$('[data-marker="item"]');
+                items = await findItems();
                 console.log(`После скролла ${scroll + 1}: найдено ${items.length} карточек`);
                 
-                if (items.length === previousCount && scroll > 1) {
+                if (items.length === previousCount && scroll > 2) {
                     console.log('Количество карточек не увеличивается, останавливаю скролл');
                     break;
                 }
                 previousCount = items.length;
             }
             
-            
-            items = await page.$$('[data-marker="item"]');
+            // Финальный поиск
+            items = await findItems();
             console.log(`✅ Всего найдено карточек на странице ${pageNum}: ${items.length}`);
             
             if (items.length === 0) {
+                // Попробуем сделать скриншот для отладки
+                console.log('⚠️  Карточки не найдены, проверяю структуру страницы...');
+                const pageContent = await page.evaluate(() => {
+                    return {
+                        title: document.title,
+                        bodyText: document.body.innerText.substring(0, 500),
+                        hasItems: document.querySelectorAll('[data-marker="item"]').length,
+                        hasLinks: document.querySelectorAll('a[href*="/kvartiry/"]').length
+                    };
+                });
+                console.log('Информация о странице:', JSON.stringify(pageContent, null, 2));
                 console.log(`⚠️  На странице ${pageNum} нет карточек, останавливаю парсинг`);
                 break;
             }
@@ -768,16 +837,37 @@ async function parseAvito() {
             try {
                 const item = items[i];
                 
-                const linkElement = await item.$('a[data-marker="item-title"]').catch(() => null);
+                // Пробуем разные способы найти ссылку
+                let linkElement = await item.$('a[data-marker="item-title"]').catch(() => null);
                 if (!linkElement) {
+                    linkElement = await item.$('a[href*="/kvartiry/"]').catch(() => null);
+                }
+                if (!linkElement) {
+                    linkElement = await item.$('a[itemprop="url"]').catch(() => null);
+                }
+                if (!linkElement) {
+                    // Пробуем найти любую ссылку внутри карточки
+                    linkElement = await item.$('a').catch(() => null);
+                }
+                
+                if (!linkElement) {
+                    console.log(`⚠️  Пропускаю карточку ${i + 1}: нет ссылки`);
                     continue;
                 }
                 
                 const href = await linkElement.getAttribute('href').catch(() => '');
+                if (!href || !href.includes('/kvartiry/')) {
+                    console.log(`⚠️  Пропускаю карточку ${i + 1}: неверная ссылка ${href}`);
+                    continue;
+                }
+                
                 const fullUrl = href.startsWith('http') ? href : `https://www.avito.ru${href}`;
-                const externalId = href.match(/\/(\d+)$/)?.[1] || fullUrl.split('/').pop()?.split('?')[0] || '';
+                const externalId = href.match(/\/(\d+)$/)?.[1] || 
+                                  href.match(/kvartiry\/(\d+)/)?.[1] ||
+                                  fullUrl.split('/').pop()?.split('?')[0] || '';
                 
                 if (!externalId) {
+                    console.log(`⚠️  Пропускаю карточку ${i + 1}: нет external ID из URL ${href}`);
                     continue;
                 }
                 

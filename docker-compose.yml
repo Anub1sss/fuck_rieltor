@@ -95,8 +95,23 @@ services:
     volumes:
       - ./parser-service:/app
 
+  frontend:
+    build: ./frontend
+    ports:
+      - "3001:3001"
+    environment:
+      - PORT=3001
+      - REACT_APP_API_URL=http://localhost:8000/api
+    depends_on:
+      - web
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/public:/app/public
+
 volumes:
   postgres_data:
+
+
 
 
 
